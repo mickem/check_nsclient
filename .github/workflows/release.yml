@@ -1,0 +1,65 @@
+name: Create release
+
+permissions:
+  contents: write
+  actions: read
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        description: 'Version to release'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download windows x64
+        uses: actions/download-artifact@v7
+        with:
+          name: check_nsclient-windows-x64
+          path: artifacts/windows-x64
+      - name: Download windows x86
+        uses: actions/download-artifact@v7
+        with:
+          name: check_nsclient-windows-x86
+          path: artifacts/windows-x86
+      - name: Download linux x64
+        uses: actions/download-artifact@v7
+        with:
+          name: check_nsclient-linux-x64
+          path: artifacts/linux-x64
+      - name: Download linux arm64
+        uses: actions/download-artifact@v7
+        with:
+          name: check_nsclient-linux-arm64
+          path: artifacts/linux-arm64
+
+      - name: Rename release assets
+        run: |
+          mkdir -p release
+          cp artifacts/windows-x64/check_nsclient.exe   release/check_nsclient-${{ inputs.version }}-windows-x64.exe
+          cp artifacts/windows-x86/check_nsclient.exe   release/check_nsclient-${{ inputs.version }}-windows-x86.exe
+          cp artifacts/linux-x64/check_nsclient         release/check_nsclient-${{ inputs.version }}-linux-x64
+          cp artifacts/linux-arm64/check_nsclient       release/check_nsclient-${{ inputs.version }}-linux-arm64
+          chmod +x release/check_nsclient-${{ inputs.version }}-linux-x64 release/check_nsclient-${{ inputs.version }}-linux-arm64
+
+      - name: Create Release
+        id: create_release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          draft: true
+          prerelease: false
+          generateReleaseNotes: true
+          artifacts: |
+            release/check_nsclient-${{ inputs.version }}-windows-x64.exe
+            release/check_nsclient-${{ inputs.version }}-windows-x86.exe
+            release/check_nsclient-${{ inputs.version }}-linux-x64
+            release/check_nsclient-${{ inputs.version }}-linux-arm64

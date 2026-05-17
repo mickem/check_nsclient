@@ -1,0 +1,32 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Cargo
+# Keep Cargo.lock — this is a binary crate, so the lockfile is committed.
+# If this ever becomes a library, remove the next line.
+# Cargo.lock
+
+# IDE / editor
+/.idea/
+/.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local environment / secrets — never commit
+.env
+.env.*
+*.local
+
+# OS / misc
+*.log
+
+# Coverage / profiling
+*.profraw
+*.profdata
+/coverage/
+tarpaulin-report.*

@@ -1,0 +1,21 @@
+name: Build feature
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches-ignore: [mob/**, main]
+
+jobs:
+  get-version:
+    uses: ./.github/workflows/get-version.yml
+  build:
+    needs: get-version
+    uses: ./.github/workflows/build-rust.yml
+    with:
+      version: ${{ needs.get-version.outputs.version }}
+    secrets:
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
