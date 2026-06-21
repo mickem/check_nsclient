@@ -39,7 +39,7 @@ jobs:
             arch: arm64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Calculate Target
         id: target
@@ -115,7 +115,7 @@ jobs:
 
       - name: Sign Windows Binary
         if: startsWith(matrix.os, 'windows-')
-        uses: azure/trusted-signing-action@v1.0.0
+        uses: azure/trusted-signing-action@v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -128,7 +128,7 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: check_nsclient-${{ steps.target.outputs.os_name }}-${{ matrix.arch }}
           path: target/${{ steps.target.outputs.triple }}/release/check_nsclient${{ startsWith(matrix.os, 'windows-') && '.exe' || '' }}
