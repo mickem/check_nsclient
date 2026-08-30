@@ -22,6 +22,18 @@ fn get_cached_password(id: &str) -> Option<String> {
         None
     }
 }
+fn remove_cached_password(id: &str) {
+    if let Ok(store) = CREDENTIAL_STORE.lock() {
+        store.borrow_mut().remove(id);
+    }
+}
+
+/// Forget every credential stored by the mock keyring (call between tests).
+pub fn reset() {
+    if let Ok(store) = CREDENTIAL_STORE.lock() {
+        store.borrow_mut().clear();
+    }
+}
 
 #[derive(Debug)]
 pub struct MockCredential {
@@ -40,9 +52,9 @@ impl CredentialApi for MockCredential {
         let mut inner = self.inner.lock().expect("Can't access mock data for set");
         let data = inner.get_mut();
         let err = data.error.take();
-        set_cached_password(&self.id, password);
         match err {
             None => {
+                set_cached_password(&self.id, password);
                 data.secret = Some(password.as_bytes().to_vec());
                 Ok(())
             }
@@ -82,6 +94,7 @@ impl CredentialApi for MockCredential {
             None => match data.secret {
                 Some(_) => {
                     data.secret = None;
+                    remove_cached_password(&self.id);
                     Ok(())
                 }
                 None => Err(Error::NoEntry),

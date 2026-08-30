@@ -149,8 +149,8 @@ use tempfile::{TempDir, tempdir};
 
 #[cfg(test)]
 pub fn mock_test_config() -> TempDir {
-    println!("Setting up mock test config");
     set_default_credential_builder(custom_mock_keyring::default_credential_builder());
+    custom_mock_keyring::reset();
     let tmp = tempdir().unwrap();
     let fake_home = tmp.path();
     unsafe {
@@ -187,9 +187,16 @@ mod tests {
         assert_eq!(profile.insecure, false);
         let api_key = get_api_key("test1").unwrap();
         assert_eq!(api_key, "apikey1");
-        let _ = remove_nsclient_profile("test1");
+        assert_eq!(get_password("test1").unwrap(), "password");
+        assert!(tokens::token_exists(KeyType::Token, "test1"));
+        assert!(tokens::token_exists(KeyType::Password, "test1"));
+
+        remove_nsclient_profile("test1").unwrap();
         let profile = get_nsclient_profile("test1").unwrap();
         assert!(profile.is_none());
+        assert!(!tokens::token_exists(KeyType::Token, "test1"));
+        assert!(!tokens::token_exists(KeyType::Password, "test1"));
+        assert!(get_api_key("test1").is_err());
         drop(tmp);
     }
 
@@ -223,6 +230,83 @@ mod tests {
         let _ = set_default_nsclient_profile("test3");
         let default_profile = get_default_nsclient_profile().unwrap().unwrap();
         assert_eq!(default_profile.id, "test3");
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn test_credentials_do_not_leak_between_tests() {
+        let tmp = mock_test_config();
+        assert!(!tokens::token_exists(KeyType::Token, "test1"));
+        assert!(!tokens::token_exists(KeyType::Token, "test3"));
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn test_remove_default_profile_clears_default() {
+        let tmp = mock_test_config();
+        add_nsclient_profile("a", "url-a", false, "u", "p", "k", None).unwrap();
+        add_nsclient_profile("b", "url-b", false, "u", "p", "k", None).unwrap();
+        assert_eq!(get_default_nsclient_profile().unwrap().unwrap().id, "a");
+
+        remove_nsclient_profile("a").unwrap();
+        assert!(get_default_nsclient_profile().unwrap().is_none());
+        // Removing a non-default profile keeps the default.
+        set_default_nsclient_profile("b").unwrap();
+        add_nsclient_profile("c", "url-c", false, "u", "p", "k", None).unwrap();
+        remove_nsclient_profile("c").unwrap();
+        assert_eq!(get_default_nsclient_profile().unwrap().unwrap().id, "b");
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn test_update_token_replaces_api_key() {
+        let tmp = mock_test_config();
+        add_nsclient_profile("t", "url", false, "u", "p", "old", None).unwrap();
+        update_token("t", "new").unwrap();
+        assert_eq!(get_api_key("t").unwrap(), "new");
+        assert_eq!(get_password("t").unwrap(), "p");
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn test_history_round_trip() {
+        let tmp = mock_test_config();
+        assert!(load_history().unwrap().is_empty());
+        store_history(vec!["ping".into(), "version".into()]).unwrap();
+        assert_eq!(
+            load_history().unwrap(),
+            vec!["ping".to_string(), "version".to_string()]
+        );
+        // Storing history must not disturb profiles.
+        add_nsclient_profile("h", "url", false, "u", "p", "k", None).unwrap();
+        store_history(vec!["ping".into()]).unwrap();
+        assert!(get_nsclient_profile("h").unwrap().is_some());
+        assert_eq!(load_history().unwrap(), vec!["ping".to_string()]);
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn test_profile_stores_username_and_ca() {
+        let tmp = mock_test_config();
+        add_nsclient_profile(
+            "full",
+            "https://host:8443",
+            true,
+            "operator",
+            "p",
+            "k",
+            Some("/etc/ca.pem".into()),
+        )
+        .unwrap();
+        let profile = get_nsclient_profile("full").unwrap().unwrap();
+        assert_eq!(profile.username, "operator");
+        assert_eq!(profile.ca.as_deref(), Some("/etc/ca.pem"));
+        assert!(profile.insecure);
         drop(tmp);
     }
 
