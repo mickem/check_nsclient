@@ -1,0 +1,896 @@
+//! End-to-end tests that drive the built `check_nsclient` binary against a real
+//! NSClient++ instance.
+//!
+//! The server is not started from here: `tests/integration/run.sh` (or `run.ps1`)
+//! builds and starts the Docker image in `tests/integration/` and then runs this
+//! suite with the connection details in the environment. The suite is skipped
+//! entirely (every test passes with a notice on stderr) when
+//! `CHECK_NSCLIENT_IT_URL` is unset, so a plain `cargo test` never needs Docker.
+//!
+//! Environment:
+//! - `CHECK_NSCLIENT_IT_URL`       e.g. `https://127.0.0.1:8443` (required to run)
+//! - `CHECK_NSCLIENT_IT_PASSWORD`  REST password (default `it-password`)
+//! - `CHECK_NSCLIENT_IT_USERNAME`  REST user (default `admin`)
+//!
+//! Every client gets its own configuration directory (a temp dir passed as
+//! `APPDATA` / `XDG_CONFIG_HOME` / `HOME`) so the developer's real profiles are
+//! never touched. Tokens do go into the real OS keyring, under profile ids that
+//! are unique to this run; `Client::drop` logs the profile out again.
+
+use serde_json::Value;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tempfile::TempDir;
+
+const BIN: &str = env!("CARGO_BIN_EXE_check_nsclient");
+
+struct Target {
+    url: String,
+    username: String,
+    password: String,
+}
+
+fn target() -> Option<Target> {
+    let url = std::env::var("CHECK_NSCLIENT_IT_URL").ok()?;
+    Some(Target {
+        url,
+        username: std::env::var("CHECK_NSCLIENT_IT_USERNAME").unwrap_or_else(|_| "admin".into()),
+        password: std::env::var("CHECK_NSCLIENT_IT_PASSWORD")
+            .unwrap_or_else(|_| "it-password".into()),
+    })
+}
+
+/// Skip the calling test (returning early) unless an NSClient++ target is configured.
+macro_rules! require_target {
+    () => {
+        match target() {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "skipped: CHECK_NSCLIENT_IT_URL is not set (see tests/integration/README.md)"
+                );
+                return;
+            }
+        }
+    };
+}
+
+/// A `check_nsclient` invocation context: isolated config dir + one logged in profile.
+struct Client {
+    config_dir: TempDir,
+    profile: String,
+    /// Unused on Windows where the config dir is selected via APPDATA only.
+    #[allow(dead_code)]
+    home: PathBuf,
+}
+
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+impl Client {
+    /// Create a client with a fresh config dir and log it in under a unique profile id.
+    fn login(target: &Target) -> Self {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let profile = format!("it-{}-{}", std::process::id(), n);
+        let config_dir = TempDir::new().expect("temp config dir");
+        let client = Self {
+            home: config_dir.path().to_path_buf(),
+            config_dir,
+            profile,
+        };
+        let out = client.run(&[
+            "nsclient",
+            "auth",
+            "login",
+            &client.profile,
+            "--url",
+            &target.url,
+            "--username",
+            &target.username,
+            "--password",
+            &target.password,
+            "--insecure",
+        ]);
+        assert_success(&out, "auth login");
+        assert_eq!(stdout(&out).trim(), "Successfully logged in");
+        client
+    }
+
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(BIN);
+        let dir = self.config_dir.path();
+        cmd.env("APPDATA", dir)
+            .env("XDG_CONFIG_HOME", dir)
+            .env("HOME", dir)
+            .env_remove("CHECK_NSCLIENT_PASSWORD");
+        cmd
+    }
+
+    /// Run the binary with `args` verbatim (no profile is injected).
+    fn run(&self, args: &[&str]) -> Output {
+        self.command()
+            .args(args)
+            .output()
+            .expect("failed to spawn check_nsclient")
+    }
+
+    /// Run an `nsclient` sub command against this client's profile with the given
+    /// global options prepended, e.g. `ns(&["--output", "json"], &["ping"])`.
+    fn ns(&self, global: &[&str], args: &[&str]) -> Output {
+        let mut all: Vec<&str> = global.to_vec();
+        all.extend(["nsclient", "--profile", &self.profile]);
+        all.extend(args);
+        self.run(&all)
+    }
+
+    /// Run an `nsclient` sub command with `--output json`, assert success and parse stdout.
+    fn json(&self, args: &[&str]) -> Value {
+        let out = self.ns(&["--output", "json"], args);
+        assert_success(&out, &args.join(" "));
+        serde_json::from_str(&stdout(&out))
+            .unwrap_or_else(|e| panic!("{}: invalid json ({e}):\n{}", args.join(" "), stdout(&out)))
+    }
+
+    /// Run an `nsclient` sub command with text output, assert success and return stdout.
+    fn text(&self, args: &[&str]) -> String {
+        let out = self.ns(&[], args);
+        assert_success(&out, &args.join(" "));
+        stdout(&out)
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        let _ = self.run(&["nsclient", "auth", "logout", &self.profile]);
+    }
+}
+
+/// One shared, logged-in client for the read-only tests. Its profile id is stable
+/// so re-runs overwrite the same keyring entries instead of accumulating new ones.
+fn shared(target: &Target) -> &'static Client {
+    static SHARED: OnceLock<Client> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let config_dir = TempDir::new().expect("temp config dir");
+        let client = Client {
+            home: config_dir.path().to_path_buf(),
+            config_dir,
+            profile: "check_nsclient-it".into(),
+        };
+        let out = client.run(&[
+            "nsclient",
+            "auth",
+            "login",
+            &client.profile,
+            "--url",
+            &target.url,
+            "--username",
+            &target.username,
+            "--password",
+            &target.password,
+            "--insecure",
+        ]);
+        assert_success(&out, "auth login (shared)");
+        client
+    })
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn assert_success(out: &Output, what: &str) {
+    assert!(
+        out.status.success(),
+        "{what} failed with {:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        stdout(out),
+        stderr(out)
+    );
+}
+
+fn assert_failure(out: &Output, what: &str) -> String {
+    assert!(
+        !out.status.success(),
+        "{what} unexpectedly succeeded\nstdout:\n{}",
+        stdout(out)
+    );
+    stderr(out)
+}
+
+fn names(list: &Value, key: &str) -> Vec<String> {
+    list.as_array()
+        .unwrap_or_else(|| panic!("expected a json array, got {list}"))
+        .iter()
+        .map(|item| item[key].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// auth / profile
+// ---------------------------------------------------------------------------
+
+#[test]
+fn profile_list_and_show_reflect_login() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.run(&["--output", "json", "profile", "list"]);
+    assert_success(&out, "profile list");
+    let list: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let entry = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == client.profile)
+        .expect("profile is listed");
+    assert_eq!(entry["url"], target.url);
+    assert_eq!(entry["username"], target.username);
+    assert_eq!(entry["insecure"], true);
+    assert_eq!(entry["default"], true, "first profile becomes the default");
+    assert_eq!(entry["has_token"], true);
+    assert_eq!(entry["has_password"], true);
+
+    let shown = client.text(&["version"]);
+    assert!(shown.contains("NSClient++"), "{shown}");
+
+    let out = client.run(&["profile", "show", &client.profile]);
+    assert_success(&out, "profile show");
+    let text = stdout(&out);
+    assert!(text.contains("has_token"), "{text}");
+    assert!(text.contains("true"), "{text}");
+}
+
+#[test]
+fn default_profile_is_used_when_none_is_given() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.run(&["nsclient", "ping"]);
+    assert_success(&out, "ping via default profile");
+    assert!(stdout(&out).starts_with("Successfully pinged NSClient++ version "));
+}
+
+#[test]
+fn wrong_password_is_rejected_at_login() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.run(&[
+        "nsclient",
+        "auth",
+        "login",
+        "it-wrong-password",
+        "--url",
+        &target.url,
+        "--username",
+        &target.username,
+        "--password",
+        "definitely-not-the-password",
+        "--insecure",
+    ]);
+    let err = assert_failure(&out, "login with wrong password");
+    assert!(err.contains("Failed to login"), "{err}");
+    assert!(err.contains("Authentication failed"), "{err}");
+}
+
+#[test]
+fn refresh_replaces_token_and_keeps_working() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.ns(&[], &["auth", "refresh", &client.profile]);
+    assert_success(&out, "auth refresh");
+    assert_eq!(stdout(&out).trim(), "Token successfully refreshed");
+
+    let out = client.ns(&[], &["ping"]);
+    assert_success(&out, "ping after refresh");
+}
+
+#[test]
+fn logout_removes_profile_and_credentials() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.run(&["nsclient", "auth", "logout", &client.profile]);
+    assert_success(&out, "auth logout");
+    assert_eq!(stdout(&out).trim(), "Successfully logged out");
+
+    let out = client.run(&["--output", "json", "profile", "list"]);
+    assert_success(&out, "profile list after logout");
+    assert_eq!(stdout(&out).trim(), "No profiles configured");
+
+    let out = client.ns(&[], &["ping"]);
+    let err = assert_failure(&out, "ping after logout");
+    assert!(err.contains("not found"), "{err}");
+}
+
+#[test]
+fn insecure_flag_is_required_for_self_signed_certificate() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.run(&[
+        "nsclient",
+        "auth",
+        "login",
+        "it-strict-tls",
+        "--url",
+        &target.url,
+        "--username",
+        &target.username,
+        "--password",
+        &target.password,
+    ]);
+    let err = assert_failure(&out, "login without --insecure");
+    assert!(err.contains("Failed to login"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// ping / version / output formats
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ping_reports_server_version() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let text = client.text(&["ping"]);
+    assert!(
+        text.starts_with("Successfully pinged NSClient++ version "),
+        "{text}"
+    );
+}
+
+#[test]
+fn version_in_every_output_format() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let json = client.json(&["version"]);
+    assert_eq!(json["name"], "NSClient++");
+    let version = json["version"].as_str().expect("version string");
+    assert!(!version.is_empty());
+
+    let yaml = stdout(&client.ns(&["--output", "yaml"], &["version"]));
+    assert!(yaml.contains("name: NSClient++"), "{yaml}");
+    assert!(yaml.contains(&format!("version: {version}")), "{yaml}");
+
+    let csv = stdout(&client.ns(&["--output", "csv"], &["version"]));
+    assert!(csv.contains("name,NSClient++"), "{csv}");
+    assert!(csv.contains(&format!("version,{version}")), "{csv}");
+
+    let rounded = client.text(&["version"]);
+    assert!(rounded.contains("│ name"), "{rounded}");
+    let markdown = stdout(&client.ns(&["--output-style", "markdown"], &["version"]));
+    assert!(markdown.contains("| name"), "{markdown}");
+    let blank = stdout(&client.ns(&["--output-style", "blank"], &["version"]));
+    assert!(blank.contains(" name"), "{blank}");
+    assert!(!blank.contains('|') && !blank.contains('│'), "{blank}");
+}
+
+#[test]
+fn debug_flag_logs_requests_to_stderr_only() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let out = client.ns(&["-d", "--output", "json"], &["version"]);
+    assert_success(&out, "version with -d");
+    let err = stderr(&out);
+    assert!(err.contains("[debug] GET "), "{err}");
+    assert!(err.contains("api/v2/info"), "{err}");
+    assert!(err.contains("200 OK from api/v2/info"), "{err}");
+    let json: Value = serde_json::from_str(&stdout(&out)).expect("stdout is still clean json");
+    assert_eq!(json["name"], "NSClient++");
+}
+
+#[test]
+fn timeout_and_user_agent_options_are_accepted() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let out = client.run(&[
+        "nsclient",
+        "--profile",
+        &client.profile,
+        "--timeout-s",
+        "5",
+        "--user-agent",
+        "check_nsclient-it/1.0",
+        "ping",
+    ]);
+    assert_success(&out, "ping with timeout/user-agent");
+}
+
+// ---------------------------------------------------------------------------
+// modules
+// ---------------------------------------------------------------------------
+
+#[test]
+fn modules_list_and_show() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let loaded = client.json(&["modules", "list"]);
+    let loaded_names = names(&loaded, "name");
+    for expected in ["CheckSystem", "CheckHelpers", "WEBServer"] {
+        assert!(
+            loaded_names.contains(&expected.to_string()),
+            "{loaded_names:?}"
+        );
+    }
+    for module in loaded.as_array().unwrap() {
+        assert_eq!(module["loaded"], true, "{module}");
+        assert!(module["metadata"].is_object(), "{module}");
+    }
+
+    let all = client.json(&["modules", "list", "--all"]);
+    assert!(all.as_array().unwrap().len() >= loaded.as_array().unwrap().len());
+    assert!(
+        all.as_array().unwrap().iter().any(|m| m["loaded"] == false),
+        "--all should include modules that are not loaded"
+    );
+
+    let shown = client.json(&["modules", "show", "CheckSystem"]);
+    assert_eq!(shown["id"], "CheckSystem");
+    assert_eq!(shown["loaded"], true);
+    assert!(shown["description"].as_str().unwrap().len() > 10);
+
+    let text = client.text(&["modules", "list"]);
+    assert!(text.contains("│ id "), "{text}");
+    assert!(
+        !text.contains("description"),
+        "description hidden by default: {text}"
+    );
+    let long = client.text(&["modules", "list", "--long"]);
+    assert!(long.contains("description"), "{long}");
+}
+
+#[test]
+fn modules_load_unload_enable_disable_cycle() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    // Pick a module that is available but not currently loaded so the cycle
+    // cannot disturb the modules the other tests depend on.
+    let all = client.json(&["modules", "list", "--all"]);
+    let candidate = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["loaded"] == false && m["enabled"] == false)
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .expect("an unloaded, disabled module to exercise");
+    let state = |client: &Client| {
+        let m = client.json(&["modules", "show", &candidate]);
+        (m["loaded"] == true, m["enabled"] == true)
+    };
+
+    let out = client.ns(&[], &["modules", "load", &candidate]);
+    assert_success(&out, "modules load");
+    assert!(stdout(&out).starts_with(&format!("Successfully loaded module {candidate}")));
+    assert_eq!(state(&client), (true, false));
+
+    let out = client.ns(&[], &["modules", "enable", &candidate]);
+    assert_success(&out, "modules enable");
+    assert_eq!(state(&client), (true, true));
+
+    let out = client.ns(&[], &["modules", "disable", &candidate]);
+    assert_success(&out, "modules disable");
+    assert_eq!(state(&client), (true, false));
+
+    let out = client.ns(&[], &["modules", "unload", &candidate]);
+    assert_success(&out, "modules unload");
+    assert_eq!(
+        stdout(&out).trim(),
+        format!("Successfully unloaded module {candidate}")
+    );
+    assert_eq!(state(&client), (false, false));
+
+    let out = client.ns(&[], &["modules", "use", &candidate]);
+    assert_success(&out, "modules use");
+    assert_eq!(state(&client), (true, true));
+
+    // Restore the original state.
+    assert_success(
+        &client.ns(&[], &["modules", "disable", &candidate]),
+        "restore disable",
+    );
+    assert_success(
+        &client.ns(&[], &["modules", "unload", &candidate]),
+        "restore unload",
+    );
+    assert_eq!(state(&client), (false, false));
+}
+
+#[test]
+fn unknown_module_is_an_error() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let out = client.ns(&["--output", "json"], &["modules", "show", "NoSuchModule"]);
+    let err = assert_failure(&out, "modules show NoSuchModule");
+    assert!(err.contains("Failed to fetch module NoSuchModule"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// queries
+// ---------------------------------------------------------------------------
+
+#[test]
+fn queries_list_and_show() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let list = client.json(&["queries", "list"]);
+    let query_names = names(&list, "name");
+    for expected in ["check_ok", "check_warning", "check_critical", "check_cpu"] {
+        assert!(
+            query_names.contains(&expected.to_string()),
+            "{query_names:?}"
+        );
+    }
+
+    let all = client.json(&["queries", "list", "--all"]);
+    assert!(all.as_array().unwrap().len() >= list.as_array().unwrap().len());
+
+    let shown = client.json(&["queries", "show", "check_ok"]);
+    assert_eq!(shown["name"], "check_ok");
+    assert_eq!(shown["plugin"], "CheckHelpers");
+    assert!(shown["metadata"].is_object());
+
+    let text = client.text(&["queries", "list"]);
+    assert!(
+        text.contains("│ name "),
+        "the query name must be visible: {text}"
+    );
+    assert!(text.contains("check_ok"), "{text}");
+}
+
+#[test]
+fn queries_execute_returns_structured_result() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let ok = client.json(&["queries", "execute", "check_ok"]);
+    assert_eq!(ok["command"], "check_ok");
+    assert_eq!(ok["result"], 0);
+    assert!(!ok["lines"].as_array().unwrap().is_empty());
+
+    let warning = client.json(&["queries", "execute", "check_warning", "message=hello there"]);
+    assert_eq!(warning["result"], 1);
+    assert!(
+        warning["lines"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("hello there"),
+        "{warning}"
+    );
+
+    // Hyphenated key/value arguments and a real system check with performance data.
+    let cpu = client.json(&[
+        "queries",
+        "execute",
+        "check_cpu",
+        "--warning=load>101",
+        "--time=5m",
+    ]);
+    assert_eq!(cpu["command"], "check_cpu");
+    assert_eq!(cpu["result"], 0, "{cpu}");
+    let perf = &cpu["lines"][0]["perf"];
+    assert!(
+        perf.is_object() && !perf.as_object().unwrap().is_empty(),
+        "{cpu}"
+    );
+
+    let text = client.text(&["queries", "execute", "check_warning", "message=in-text"]);
+    assert!(text.contains("│ command │ check_warning"), "{text}");
+    assert!(text.contains("in-text"), "{text}");
+    assert!(text.contains("│ result  │ WARNING"), "{text}");
+}
+
+#[test]
+fn execute_nagios_uses_nagios_format_and_exit_codes() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    for (query, expected_code, expected_word) in [
+        ("check_ok", 0, "OK"),
+        ("check_warning", 1, "WARNING"),
+        ("check_critical", 2, "CRITICAL"),
+    ] {
+        let out = client.ns(&[], &["queries", "execute-nagios", query, "message=probe"]);
+        assert_eq!(
+            out.status.code(),
+            Some(expected_code),
+            "{query}: stdout={} stderr={}",
+            stdout(&out),
+            stderr(&out)
+        );
+        let text = stdout(&out);
+        assert!(text.contains("probe"), "{query}: {text}");
+        assert!(!text.contains('│'), "nagios output must be plain: {text}");
+
+        let out = client.ns(&["--output", "json"], &["queries", "execute-nagios", query]);
+        assert_eq!(out.status.code(), Some(expected_code));
+        let json: Value = serde_json::from_str(&stdout(&out)).unwrap();
+        assert_eq!(json["result"], expected_word);
+        assert_eq!(json["command"], query);
+    }
+
+    let out = client.ns(
+        &[],
+        &[
+            "queries",
+            "execute-nagios",
+            "check_cpu",
+            "--warning=load>101",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains('|'),
+        "perf data separator expected: {}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn unknown_query_yields_unknown_status() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    // NSClient++ answers an unknown query with a regular UNKNOWN result rather
+    // than an HTTP error, so the client must surface it as such.
+    let json = client.json(&["queries", "execute", "no_such_query"]);
+    assert_eq!(json["result"], 3, "{json}");
+    assert!(
+        json["lines"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown command"),
+        "{json}"
+    );
+
+    let text = client.text(&["queries", "execute", "no_such_query"]);
+    assert!(text.contains("│ result  │ UNKNOWN"), "{text}");
+
+    let out = client.ns(&[], &["queries", "execute-nagios", "no_such_query"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stdout(&out).contains("Unknown command"), "{}", stdout(&out));
+}
+
+// ---------------------------------------------------------------------------
+// logs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn logs_list_status_and_reset() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let page = client.json(&["logs", "list", "--page", "1", "--size", "5"]);
+    assert!(page["content"].is_array(), "{page}");
+    assert!(page["content"].as_array().unwrap().len() <= 5);
+    assert!(page["count"].is_number() && page["pages"].is_number() && page["limit"].is_number());
+    if let Some(record) = page["content"].as_array().unwrap().first() {
+        for key in ["level", "date", "file", "line", "message"] {
+            assert!(!record[key].is_null(), "missing {key} in {record}");
+        }
+    }
+
+    let text = client.text(&["logs", "list", "--size", "3"]);
+    assert!(text.contains("│ level "), "{text}");
+    assert!(!text.contains("│ file "), "file hidden by default: {text}");
+    let long = client.text(&["logs", "list", "--size", "3", "--long"]);
+    assert!(long.contains("│ file "), "{long}");
+
+    let filtered = client.json(&["logs", "list", "--level", "error", "--size", "50"]);
+    for record in filtered["content"].as_array().unwrap() {
+        assert_eq!(record["level"].as_str().unwrap().to_lowercase(), "error");
+    }
+
+    let status = client.json(&["logs", "status"]);
+    assert!(status["errors"].is_number(), "{status}");
+    let status_text = client.text(&["logs", "status"]);
+    assert!(status_text.contains("│ errors "), "{status_text}");
+
+    let out = client.ns(&[], &["logs", "reset"]);
+    assert_success(&out, "logs reset");
+    assert_eq!(stdout(&out).trim(), "Successfully reset log status");
+    let status = client.json(&["logs", "status"]);
+    assert_eq!(status["errors"], 0);
+    assert!(
+        status["last_error"].is_null() || status["last_error"] == "",
+        "{status}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// scripts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scripts_runtimes_and_scripts() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let runtimes = client.json(&["scripts", "list-runtimes"]);
+    let runtime_names = names(&runtimes, "name");
+    for expected in ["ext", "lua"] {
+        assert!(
+            runtime_names.contains(&expected.to_string()),
+            "{runtime_names:?}"
+        );
+    }
+    for runtime in runtimes.as_array().unwrap() {
+        assert!(runtime["module"].is_string() && runtime["title"].is_string());
+    }
+    let text = client.text(&["scripts", "list-runtimes"]);
+    assert!(text.contains("│ module "), "{text}");
+    assert!(text.contains("CheckExternalScripts"), "{text}");
+
+    let scripts = client.json(&["scripts", "list", "--runtime", "ext"]);
+    assert!(scripts.is_array(), "{scripts}");
+    let text = client.text(&["scripts", "list", "--runtime", "ext"]);
+    assert!(
+        text.trim().is_empty() || text.contains("│ script "),
+        "{text}"
+    );
+
+    // NSClient++ 0.18.0 does not answer the script listing for the lua runtime
+    // (HTTP 500 "No response from module"). Accept either a fixed server or
+    // the failure — but the failure must carry the server's explanation.
+    let out = client.ns(
+        &["--output", "json"],
+        &["scripts", "list", "--runtime", "lua"],
+    );
+    if !out.status.success() {
+        let err = stderr(&out);
+        assert!(err.contains("runtime lua"), "{err}");
+        assert!(err.contains("500"), "{err}");
+        assert!(err.contains("No response from module"), "{err}");
+    }
+
+    let out = client.ns(&[], &["scripts", "list", "--runtime", "no-such-runtime"]);
+    let err = assert_failure(&out, "scripts list for unknown runtime");
+    assert!(err.contains("no-such-runtime"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// settings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn settings_status_list_and_descriptions() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let status = client.json(&["settings", "status"]);
+    assert!(status["context"].is_string(), "{status}");
+    assert!(status["type"].is_string(), "{status}");
+    assert!(status["has_changed"].is_boolean(), "{status}");
+    let text = client.text(&["settings", "status"]);
+    assert!(text.contains("│ has_changed "), "{text}");
+
+    let list = client.json(&["settings", "list"]);
+    let entries = list.as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["path"] == "/modules" && e["key"] == "WEBServer"),
+        "WEBServer module setting expected in {list}"
+    );
+
+    let descriptions = client.json(&["settings", "descriptions"]);
+    let descriptions = descriptions.as_array().unwrap();
+    assert!(!descriptions.is_empty());
+    let port = descriptions
+        .iter()
+        .find(|d| d["path"] == "/settings/WEB/server" && d["key"] == "port")
+        .unwrap_or_else(|| panic!("web server port description expected"));
+    assert!(port["plugins"].is_array(), "{port}");
+    assert!(port["type"].is_string(), "{port}");
+
+    let text = client.text(&["settings", "descriptions"]);
+    assert!(text.contains("│ key "), "{text}");
+    assert!(!text.contains("default_value"), "hidden by default: {text}");
+    let long = stdout(&client.ns(&["--output-long"], &["settings", "descriptions"]));
+    assert!(long.contains("default_value"), "{long}");
+}
+
+#[test]
+fn settings_set_and_command_round_trip() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let path = "/settings/check_nsclient-it";
+    let key = format!("key-{}", std::process::id());
+    let value = "integration value";
+
+    let out = client.ns(
+        &[],
+        &[
+            "settings", "set", "--path", path, "--key", &key, "--value", value,
+        ],
+    );
+    assert_success(&out, "settings set");
+    assert_eq!(stdout(&out).trim(), format!("Updated {path}/{key}"));
+
+    let list = client.json(&["settings", "list"]);
+    let entry = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["path"] == path && e["key"] == key)
+        .unwrap_or_else(|| panic!("updated setting missing from {list}"));
+    assert_eq!(entry["value"], value);
+
+    let status = client.json(&["settings", "status"]);
+    assert_eq!(status["has_changed"], true, "{status}");
+
+    // (has_changed flips back to false after `save`, but other tests toggle
+    // module settings concurrently, so only the round trip is asserted here.)
+    for action in ["save", "load", "reload"] {
+        let out = client.ns(&[], &["settings", "command", action]);
+        assert_success(&out, &format!("settings command {action}"));
+        assert!(stdout(&out).starts_with("Executed "), "{}", stdout(&out));
+    }
+
+    let list = client.json(&["settings", "list"]);
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["path"] == path && e["key"] == key),
+        "setting must survive save/load"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// metrics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn metrics_show() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    // NSClient++ serves an empty body until CheckSystem's first collection cycle
+    // (a few seconds after start), which the client reports as an error; wait it out.
+    let mut metrics = Value::Null;
+    for attempt in 0..30 {
+        let out = client.ns(&["--output", "json"], &["metrics", "show"]);
+        if out.status.success() {
+            metrics = serde_json::from_str(&stdout(&out)).expect("metrics json");
+            break;
+        }
+        let err = stderr(&out);
+        assert!(
+            err.contains("Empty response from api/v2/metrics"),
+            "attempt {attempt}: unexpected error: {err}"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    let map = metrics
+        .as_object()
+        .expect("metrics did not become available within 30s");
+    assert!(!map.is_empty());
+    assert!(
+        map.keys().any(|k| k.starts_with("system.")),
+        "expected system.* metrics from CheckSystem, got {:?}",
+        map.keys().take(10).collect::<Vec<_>>()
+    );
+
+    let text = client.text(&["metrics", "show"]);
+    assert!(text.contains("│ system."), "{text}");
+    assert!(
+        !text.contains("\"\""),
+        "strings must not be json-quoted: {text}"
+    );
+}
