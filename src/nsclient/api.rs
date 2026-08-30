@@ -1,4 +1,5 @@
 use crate::config;
+use crate::debug;
 use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
@@ -151,17 +152,22 @@ impl ApiClient {
     where
         F: Fn(RequestBuilder) -> RequestBuilder,
     {
+        debug::log(1, format!("{method} {}", self.url_for(path)));
         let response = configure(self.authed_request(method.clone(), path)?)
             .send()
             .await?;
+        debug::log(1, format!("{} from {path}", response.status()));
         if !Self::is_auth_failure(response.status()) {
             return Self::check_status(response, path).await;
         }
         let status = response.status();
+        debug::log(1, "Credentials rejected, trying to refresh the token");
         if !self.refresh_token().await? {
             anyhow::bail!("Authentication failed for {path}: {status}");
         }
+        debug::log(1, format!("{method} {} (retry)", self.url_for(path)));
         let response = configure(self.authed_request(method, path)?).send().await?;
+        debug::log(1, format!("{} from {path}", response.status()));
         if Self::is_auth_failure(response.status()) {
             anyhow::bail!(
                 "Authentication failed for {path} even after refreshing the token: {}",
@@ -177,6 +183,7 @@ impl ApiClient {
             return Ok(response);
         }
         let body = response.text().await.unwrap_or_default();
+        debug::log(2, format!("Response body from {path}: {body}"));
         let body = body.trim();
         if body.is_empty() {
             anyhow::bail!("Invalid response status from {path}: {status}");

@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod constants;
+mod debug;
 mod nsclient;
 mod profile;
 mod rendering;
@@ -16,10 +17,8 @@ use clap::Parser;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Handle global flags (like debug)
-    if cli.debug > 0 {
-        println!("Debug mode enabled (level {})", cli.debug);
-    }
+    debug::set_level(cli.debug);
+    debug::log(1, format!("Debug output enabled (level {})", cli.debug));
     if cli.wsl {
         tokens::enable_wsl_workaround();
     }

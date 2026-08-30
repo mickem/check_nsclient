@@ -41,7 +41,7 @@ fn parse_kv_option(raw: &str) -> Result<(String, String), String> {
 #[command(version)]
 #[command(about = "NSClient command line client", long_about = None)]
 pub struct Cli {
-    /// Turn debugging information on
+    /// Print debug information (HTTP requests/responses) to stderr; repeat for more detail
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub(crate) debug: u8,
 
