@@ -61,7 +61,21 @@ impl ApiClient {
 
     async fn get_json<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
         let response = self.send(Method::GET, path, |b| b).await?;
-        Ok(response.json::<T>().await?)
+        Self::parse_json(response, path).await
+    }
+
+    /// Decode a JSON body, turning an empty body (which NSClient++ sends for e.g.
+    /// `/api/v2/metrics` before the first collection cycle) into a readable error
+    /// instead of serde's "EOF while parsing a value".
+    async fn parse_json<T: DeserializeOwned>(response: Response, path: &str) -> anyhow::Result<T> {
+        let body = response.text().await?;
+        if body.trim().is_empty() {
+            anyhow::bail!(
+                "Empty response from {path} (the server may still be starting up, try again shortly)"
+            );
+        }
+        serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON response from {path}: {e}"))
     }
 
     async fn get_empty(&self, path: &str) -> anyhow::Result<()> {
@@ -74,7 +88,7 @@ impl ApiClient {
         query: &[(String, String)],
     ) -> anyhow::Result<T> {
         let response = self.send(Method::GET, path, |b| b.query(query)).await?;
-        Ok(response.json::<T>().await?)
+        Self::parse_json(response, path).await
     }
 
     async fn delete(&self, path: &str) -> anyhow::Result<()> {
@@ -569,6 +583,37 @@ mod tests {
         let err = api.ping().await.unwrap_err().to_string();
         assert!(err.contains("500"), "{err}");
         assert!(err.contains("kaboom"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn empty_body_is_reported_clearly() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/metrics"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let err = api.get_metrics().await.unwrap_err().to_string();
+        assert!(err.contains("Empty response from api/v2/metrics"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn invalid_json_is_reported_with_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>oops</html>"))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let err = api.ping().await.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid JSON response from api/v2/info"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
