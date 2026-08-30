@@ -60,6 +60,22 @@ pub async fn route_settings_commands(
                 Err(e) => anyhow::bail!("Failed to update setting {path}/{key}: {:#}", e),
             }
         }
+        SettingsCommand::Diff { path } => match api.get_settings_diff(path).await {
+            Ok(diff) => {
+                if output.is_flat() {
+                    if diff.entries.is_empty() {
+                        output.print("No unsaved changes");
+                        return Ok(());
+                    }
+                    output.render_flat_list(&diff.entries, &false, &["is_sensitive"])
+                } else {
+                    // json/yaml keep the count the server reported alongside
+                    // the entries.
+                    output.render_nested_single(&diff)
+                }
+            }
+            Err(e) => anyhow::bail!("Failed to fetch settings diff: {:#}", e),
+        },
         SettingsCommand::Delete {
             path,
             key,
@@ -95,7 +111,7 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::SettingsDeleteResult;
+    use crate::nsclient::messages::{SettingsDeleteResult, SettingsDiff, SettingsDiffEntry};
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;
@@ -204,6 +220,111 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    fn diff_entry(change_type: &str) -> SettingsDiffEntry {
+        SettingsDiffEntry {
+            change_type: change_type.into(),
+            path: "/settings/probe".into(),
+            key: "k1".into(),
+            old_value: String::new(),
+            new_value: "v1".into(),
+            is_sensitive: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn diff_text_lists_the_changes() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_settings_diff()
+            .withf(|path| path == "/settings/probe")
+            .returning(|_| {
+                Ok(SettingsDiff {
+                    entries: vec![diff_entry("added")],
+                    count: 1,
+                })
+            });
+        let (output, out) = rendering(OutputFormat::Text, false);
+
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Diff {
+                path: "/settings/probe".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let rendered = out.borrow();
+        assert!(rendered.contains("| change_type"), "{rendered}");
+        assert!(rendered.contains("added"), "{rendered}");
+        assert!(rendered.contains("k1"), "{rendered}");
+        assert!(
+            !rendered.contains("is_sensitive"),
+            "hidden by default: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_reports_a_clean_store_in_text_and_keeps_the_count_in_json() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_settings_diff().returning(|_| {
+            Ok(SettingsDiff {
+                entries: vec![],
+                count: 0,
+            })
+        });
+        let (output, out) = rendering(OutputFormat::Text, false);
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Diff {
+                path: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.borrow().as_str(), "No unsaved changes\n");
+
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_settings_diff().returning(|_| {
+            Ok(SettingsDiff {
+                entries: vec![diff_entry("modified")],
+                count: 1,
+            })
+        });
+        let (output, out) = rendering(OutputFormat::Json, false);
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Diff {
+                path: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out.borrow()).unwrap();
+        assert_eq!(parsed["count"], 1);
+        assert_eq!(parsed["entries"][0]["change_type"], "modified");
+    }
+
+    #[tokio::test]
+    async fn diff_error_is_reported() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_settings_diff()
+            .returning(|_| Err(anyhow!("boom")));
+        let (output, _) = rendering(OutputFormat::Text, false);
+        let err = route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Diff {
+                path: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Failed to fetch settings diff: boom");
     }
 
     #[tokio::test]

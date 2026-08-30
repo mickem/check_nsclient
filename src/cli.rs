@@ -355,6 +355,12 @@ pub enum SettingsCommand {
         #[arg(long)]
         value: String,
     },
+    /// Show the changes made since the last save
+    Diff {
+        /// Only show changes under this path
+        #[arg(long, default_value = "")]
+        path: String,
+    },
     /// Remove a setting key, or a whole section
     // Removing a whole section is destructive, so it has to be asked for
     // explicitly rather than by leaving --key out.

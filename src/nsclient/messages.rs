@@ -103,6 +103,34 @@ pub struct SettingsEntry {
     pub value: String,
 }
 
+/// One configuration change since the last save.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct SettingsDiffEntry {
+    /// added / removed / modified / path_added / path_removed
+    #[tabled()]
+    pub change_type: String,
+    #[tabled()]
+    pub path: String,
+    #[tabled()]
+    pub key: String,
+    #[tabled()]
+    pub old_value: String,
+    #[tabled()]
+    pub new_value: String,
+    /// Values of sensitive keys are redacted to `***` by the server.
+    #[tabled()]
+    #[serde(default)]
+    pub is_sensitive: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SettingsDiff {
+    #[serde(default)]
+    pub entries: Vec<SettingsDiffEntry>,
+    #[serde(default)]
+    pub count: u64,
+}
+
 /// What the server removed in response to a settings DELETE.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SettingsDeleteResult {

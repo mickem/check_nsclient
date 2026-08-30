@@ -1197,6 +1197,79 @@ fn settings_list_can_be_filtered_by_path() {
 }
 
 #[test]
+fn settings_diff_tracks_unsaved_changes() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    // Start from a saved (clean) store so the diff below is ours alone.
+    assert_success(
+        &client.ns(&[], &["settings", "command", "save"]),
+        "settings command save",
+    );
+    let clean = client.json(&["settings", "diff"]);
+    assert_eq!(clean["count"], 0, "{clean}");
+    assert_eq!(
+        client.text(&["settings", "diff"]).trim(),
+        "No unsaved changes"
+    );
+
+    let path = format!("/settings/it-diff-{}", std::process::id());
+    assert_success(
+        &client.ns(
+            &[],
+            &[
+                "settings", "set", "--path", &path, "--key", "k1", "--value", "v1",
+            ],
+        ),
+        "settings set",
+    );
+
+    let diff = client.json(&["settings", "diff"]);
+    assert!(diff["count"].as_u64().unwrap() >= 1, "{diff}");
+    let entry = diff["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["path"] == path && e["key"] == "k1")
+        .unwrap_or_else(|| panic!("our change is missing from {diff}"));
+    assert_eq!(entry["new_value"], "v1", "{entry}");
+    assert!(entry["change_type"].is_string(), "{entry}");
+    assert!(entry["is_sensitive"].is_boolean(), "{entry}");
+
+    // The same change, filtered to its own path. Creating a key in a new
+    // section reports both the key (`added`) and the section (`path_added`).
+    let scoped = client.json(&["settings", "diff", "--path", &path]);
+    let scoped_entries = scoped["entries"].as_array().unwrap();
+    assert!(!scoped_entries.is_empty(), "{scoped}");
+    for entry in scoped_entries {
+        assert_eq!(entry["path"], path, "{entry}");
+    }
+    assert!(scoped_entries.iter().any(|e| e["key"] == "k1"), "{scoped}");
+
+    let text = client.text(&["settings", "diff"]);
+    assert!(text.contains("│ change_type"), "{text}");
+    assert!(text.contains("k1"), "{text}");
+    assert!(!text.contains("is_sensitive"), "hidden by default: {text}");
+
+    // Saving clears the diff again.
+    assert_success(
+        &client.ns(&[], &["settings", "command", "save"]),
+        "settings command save",
+    );
+    assert_eq!(client.json(&["settings", "diff"])["count"], 0);
+
+    // Tidy up after ourselves.
+    assert_success(
+        &client.ns(&[], &["settings", "delete", "--path", &path, "--all-keys"]),
+        "settings delete",
+    );
+    assert_success(
+        &client.ns(&[], &["settings", "command", "save"]),
+        "settings command save",
+    );
+}
+
+#[test]
 fn settings_delete_removes_a_key_and_a_section() {
     let target = require_target!();
     let client = Client::login(&target);

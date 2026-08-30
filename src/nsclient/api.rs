@@ -7,7 +7,7 @@ use crate::nsclient::messages::{
     ListQueriesResult, LogRecord, LogStatus, LoginResponse, MetadataChannel, MetadataResource,
     Metrics, ModulesResult, PaginatedResponse, PingResult, QueryResult, ScriptRuntimes,
     SettingsCommandAction, SettingsCommandRequest, SettingsDeleteResult, SettingsDescription,
-    SettingsEntry, SettingsStatus, Tags,
+    SettingsDiff, SettingsEntry, SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -296,6 +296,8 @@ pub trait ApiClientApi: Send + Sync {
         key: Option<String>,
     ) -> anyhow::Result<SettingsDeleteResult>;
     async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
+    /// The changes made since the last save, optionally limited to `path`.
+    async fn get_settings_diff(&self, path: &str) -> anyhow::Result<SettingsDiff>;
     async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()>;
     async fn settings_command(&self, command: SettingsCommandAction) -> anyhow::Result<()>;
     async fn login(&self) -> anyhow::Result<LoginResponse>;
@@ -468,6 +470,15 @@ impl ApiClientApi for ApiClient {
         self.get_json("api/v2/settings/descriptions").await
     }
 
+    async fn get_settings_diff(&self, path: &str) -> anyhow::Result<SettingsDiff> {
+        let params: Vec<(String, String)> = if path.is_empty() {
+            Vec::new()
+        } else {
+            vec![("path".to_string(), path.to_string())]
+        };
+        self.get_with_query("api/v2/settings/diff", &params).await
+    }
+
     async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()> {
         self.send_json(Method::PUT, "api/v2/settings", settings)
             .await
@@ -567,6 +578,7 @@ pub mod mocks {
             async fn get_settings(&self, path: &str) -> anyhow::Result<Vec<SettingsEntry>>;
             async fn delete_settings(&self, path: &str, key: Option<String>) -> anyhow::Result<SettingsDeleteResult>;
             async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
+            async fn get_settings_diff(&self, path: &str) -> anyhow::Result<SettingsDiff>;
             async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()>;
             async fn settings_command(
                 &self,
@@ -907,6 +919,52 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn settings_diff_passes_the_path_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/settings/diff"))
+            .and(query_param("path", "/settings/probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{
+                    "path": "/settings/probe",
+                    "key": "k1",
+                    "old_value": "",
+                    "new_value": "v1",
+                    "change_type": "added",
+                    "is_sensitive": false
+                }],
+                "count": 1
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let diff = api.get_settings_diff("/settings/probe").await.unwrap();
+        assert_eq!(diff.count, 1);
+        assert_eq!(diff.entries[0].change_type, "added");
+        assert_eq!(diff.entries[0].new_value, "v1");
+    }
+
+    #[tokio::test]
+    async fn settings_diff_without_a_path_sends_no_filter() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/settings/diff"))
+            .and(wiremock::matchers::query_param_is_missing("path"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"entries": [], "count": 0})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(api.get_settings_diff("").await.unwrap().count, 0);
     }
 
     #[tokio::test]
