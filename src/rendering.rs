@@ -108,11 +108,13 @@ impl Rendering {
                 self.sink.render(table.to_string().as_str());
             }
             OutputFormat::Csv => {
-                let mut wtr = csv::Writer::from_writer(std::io::stdout());
+                let mut wtr = csv::Writer::from_writer(vec![]);
                 for record in object {
                     wtr.serialize(record)?;
                 }
                 wtr.flush()?;
+                let result = String::from_utf8(wtr.into_inner()?)?;
+                self.sink.render(&result);
             }
         }
         Ok(())
@@ -178,5 +180,181 @@ impl RenderToString for StringRender {
     fn render(&self, str: &str) {
         self.string.borrow_mut().push_str(&str);
         self.string.borrow_mut().push_str("\n");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+    use tabled::Tabled;
+
+    #[derive(Tabled, Serialize)]
+    struct Row {
+        id: String,
+        name: String,
+        description: String,
+    }
+
+    fn rows() -> Vec<Row> {
+        vec![Row {
+            id: "1".into(),
+            name: "one".into(),
+            description: "first".into(),
+        }]
+    }
+
+    fn rendering(
+        format: OutputFormat,
+        style: OutputStyle,
+        long: bool,
+    ) -> (Rendering, Rc<RefCell<String>>) {
+        let sink = Box::new(StringRender::new());
+        let output = sink.string.clone();
+        (Rendering::new(format, style, long, sink), output)
+    }
+
+    #[test]
+    fn format_predicates() {
+        assert!(
+            rendering(OutputFormat::Text, OutputStyle::Rounded, false)
+                .0
+                .is_text()
+        );
+        assert!(
+            rendering(OutputFormat::Text, OutputStyle::Rounded, false)
+                .0
+                .is_flat()
+        );
+        assert!(
+            rendering(OutputFormat::Csv, OutputStyle::Rounded, false)
+                .0
+                .is_flat()
+        );
+        assert!(
+            !rendering(OutputFormat::Csv, OutputStyle::Rounded, false)
+                .0
+                .is_text()
+        );
+        assert!(
+            !rendering(OutputFormat::Json, OutputStyle::Rounded, false)
+                .0
+                .is_flat()
+        );
+        assert!(
+            !rendering(OutputFormat::Yaml, OutputStyle::Rounded, false)
+                .0
+                .is_flat()
+        );
+    }
+
+    #[test]
+    fn flat_list_hides_long_columns_unless_requested() {
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Rounded, false);
+        r.render_flat_list(&rows(), &false, &["description"])
+            .unwrap();
+        assert_eq!(
+            out.borrow().as_str(),
+            "╭────┬──────╮\n│ id │ name │\n├────┼──────┤\n│ 1  │ one  │\n╰────┴──────╯\n"
+        );
+
+        // Per-command --long
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Rounded, false);
+        r.render_flat_list(&rows(), &true, &["description"])
+            .unwrap();
+        assert!(out.borrow().contains("description"));
+
+        // Global --output-long
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Rounded, true);
+        r.render_flat_list(&rows(), &false, &["description"])
+            .unwrap();
+        assert!(out.borrow().contains("description"));
+    }
+
+    #[test]
+    fn flat_list_ignores_unknown_long_columns() {
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Rounded, false);
+        r.render_flat_list(&rows(), &false, &["does_not_exist"])
+            .unwrap();
+        assert!(out.borrow().contains("description"));
+    }
+
+    #[test]
+    fn flat_list_styles() {
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Markdown, true);
+        r.render_flat_list(&rows(), &false, &[]).unwrap();
+        assert_eq!(
+            out.borrow().as_str(),
+            "| id | name | description |\n|----|------|-------------|\n| 1  | one  | first       |\n"
+        );
+
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Blank, true);
+        r.render_flat_list(&rows(), &false, &[]).unwrap();
+        assert_eq!(
+            out.borrow().as_str(),
+            " id   name   description \n 1    one    first       \n"
+        );
+    }
+
+    #[test]
+    fn flat_list_csv_goes_through_the_sink_with_header() {
+        let (r, out) = rendering(OutputFormat::Csv, OutputStyle::Rounded, false);
+        r.render_flat_list(&rows(), &false, &["description"])
+            .unwrap();
+        assert_eq!(
+            out.borrow().as_str(),
+            "id,name,description\n1,one,first\n\n"
+        );
+    }
+
+    #[test]
+    fn flat_single_text_and_csv() {
+        let mut map = IndexMap::new();
+        map.insert("key".to_string(), "value".to_string());
+        map.insert("other".to_string(), "x, y".to_string());
+
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Markdown, false);
+        r.render_flat_single(&map).unwrap();
+        assert_eq!(
+            out.borrow().as_str(),
+            "| key   | value |\n| other | x, y  |\n"
+        );
+
+        let (r, out) = rendering(OutputFormat::Csv, OutputStyle::Rounded, false);
+        r.render_flat_single(&map).unwrap();
+        assert_eq!(out.borrow().as_str(), "key,value\nother,\"x, y\"\n\n");
+    }
+
+    #[test]
+    fn nested_json_and_yaml() {
+        let (r, out) = rendering(OutputFormat::Json, OutputStyle::Rounded, false);
+        r.render_nested_list(&rows()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out.borrow()).unwrap();
+        assert_eq!(parsed[0]["name"], "one");
+
+        let (r, out) = rendering(OutputFormat::Yaml, OutputStyle::Rounded, false);
+        r.render_nested_single(&rows()[0]).unwrap();
+        assert_eq!(
+            out.borrow().as_str(),
+            "id: '1'\nname: one\ndescription: first\n\n"
+        );
+    }
+
+    #[test]
+    fn unsupported_format_combinations_are_errors() {
+        let (r, _) = rendering(OutputFormat::Text, OutputStyle::Rounded, false);
+        assert!(r.render_nested_list(&rows()).is_err());
+        assert!(r.render_nested_single(&rows()[0]).is_err());
+
+        let (r, _) = rendering(OutputFormat::Json, OutputStyle::Rounded, false);
+        assert!(r.render_flat_list(&rows(), &false, &[]).is_err());
+        assert!(r.render_flat_single(&IndexMap::new()).is_err());
+    }
+
+    #[test]
+    fn print_writes_a_line() {
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Rounded, false);
+        r.print("hello");
+        assert_eq!(out.borrow().as_str(), "hello\n");
     }
 }
