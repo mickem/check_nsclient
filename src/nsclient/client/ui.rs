@@ -148,8 +148,8 @@ impl UI<'_> {
                     }
                 }
             },
-            Err(_) => {
-                self.on_error("Invalid command");
+            Err(e) => {
+                self.on_error(&format!("Invalid command: {e:#}"));
             }
         };
     }

@@ -2,27 +2,33 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tui_prompts::FocusState::Focused;
 use tui_prompts::{State, TextState};
 
+/// Built-in commands understood by `parse_command` (anything else is treated as a query name).
 const VALID_COMMANDS: &[&str] = &[
-    "ping", "version", "query", "modules", "settings", "metrics", "refresh", "history", "exit",
-    "help", "queries", "load", "unload", "plugins",
+    "ping", "version", "query", "modules", "refresh", "history", "exit", "help", "queries", "list",
+    "load", "unload", "plugins",
 ];
 
 const MAX_HISTORY_LENGTH: usize = 30;
 
+#[derive(Debug)]
 pub struct QueryCommand {
     pub command: String,
     pub args: Vec<(String, String)>,
 }
 
 impl QueryCommand {
-    fn from_tokens(tokens: &[String]) -> Self {
-        Self {
-            command: tokens[0].clone(),
-            args: parse_arguments(&tokens[1..]),
-        }
+    fn from_tokens(tokens: &[String]) -> anyhow::Result<Self> {
+        let Some((command, args)) = tokens.split_first() else {
+            anyhow::bail!("Invalid syntax: query <name> [key=value...]");
+        };
+        Ok(Self {
+            command: command.clone(),
+            args: parse_arguments(args),
+        })
     }
 }
 
+#[derive(Debug)]
 pub enum ModuleCommand {
     Load(String),
     Unload(String),
@@ -41,12 +47,14 @@ fn parse_arguments(args: &[String]) -> Vec<(String, String)> {
     map
 }
 
+#[derive(Debug)]
 pub enum HistoryCommand {
     List,
     Clear,
     Delete(usize),
 }
 
+#[derive(Debug)]
 pub enum CommandType {
     Ping,
     Version,
@@ -58,6 +66,7 @@ pub enum CommandType {
     History(HistoryCommand),
     Module(ModuleCommand),
 }
+#[derive(Debug)]
 pub struct Command {
     pub command: CommandType,
 }
@@ -193,6 +202,12 @@ impl<'a> CommandInput<'a> {
                 vec!["History cleared".into()]
             }
             HistoryCommand::Delete(index) => {
+                if index >= self.history.len() {
+                    return vec![format!(
+                        "Invalid history index {index} (history has {} entries)",
+                        self.history.len()
+                    )];
+                }
                 self.history.remove(index);
                 vec!["History deleted".into()]
             }
@@ -310,10 +325,10 @@ fn parse_command(tokens: &[String]) -> anyhow::Result<Command> {
             command: parse_modules_command(&tokens[1..])?,
         }),
         "load" => Ok(Command {
-            command: CommandType::Module(ModuleCommand::Load(tokens[1].clone())),
+            command: parse_module_arg(&tokens[1..], "load", ModuleCommand::Load)?,
         }),
         "unload" => Ok(Command {
-            command: CommandType::Module(ModuleCommand::Unload(tokens[1].clone())),
+            command: parse_module_arg(&tokens[1..], "unload", ModuleCommand::Unload)?,
         }),
         "plugins" => Ok(Command {
             command: CommandType::Module(ModuleCommand::List),
@@ -325,17 +340,25 @@ fn parse_command(tokens: &[String]) -> anyhow::Result<Command> {
             command: CommandType::Help,
         }),
         "query" => Ok(Command {
-            command: CommandType::Query(QueryCommand::from_tokens(&tokens[1..])),
+            command: CommandType::Query(QueryCommand::from_tokens(&tokens[1..])?),
         }),
-        "list" => Ok(Command {
-            command: CommandType::Queries,
-        }),
-        "queries" => Ok(Command {
+        "list" | "queries" => Ok(Command {
             command: CommandType::Queries,
         }),
         _ => Ok(Command {
-            command: CommandType::Query(QueryCommand::from_tokens(tokens)),
+            command: CommandType::Query(QueryCommand::from_tokens(tokens)?),
         }),
+    }
+}
+
+fn parse_module_arg(
+    args: &[String],
+    name: &str,
+    build: fn(String) -> ModuleCommand,
+) -> anyhow::Result<CommandType> {
+    match args {
+        [module] => Ok(CommandType::Module(build(module.clone()))),
+        _ => anyhow::bail!("Invalid syntax: {name} <module>"),
     }
 }
 
@@ -366,18 +389,8 @@ fn parse_modules_command(args: &[String]) -> anyhow::Result<CommandType> {
     }
     match args[0].to_lowercase().as_str() {
         "list" => Ok(CommandType::Module(ModuleCommand::List)),
-        "load" => {
-            if args.len() != 2 {
-                anyhow::bail!("Invalid syntax: modules load <module>");
-            }
-            Ok(CommandType::Module(ModuleCommand::Load(args[1].clone())))
-        }
-        "unload" => {
-            if args.len() != 2 {
-                anyhow::bail!("Invalid syntax: modules unload <module>");
-            }
-            Ok(CommandType::Module(ModuleCommand::Unload(args[1].clone())))
-        }
+        "load" => parse_module_arg(&args[1..], "modules load", ModuleCommand::Load),
+        "unload" => parse_module_arg(&args[1..], "modules unload", ModuleCommand::Unload),
         &_ => anyhow::bail!("Invalid modules command"),
     }
 }
@@ -463,5 +476,162 @@ mod tests {
         assert!(is_valid_command("PiNg", &[]));
         assert!(!is_valid_command("unknown", &[]));
         assert!(is_valid_command("ExtraCommand", &["ExtraCommand".into()]));
+    }
+
+    #[test]
+    fn every_builtin_command_is_understood_by_the_parser() {
+        for name in VALID_COMMANDS {
+            let tokens = vec![name.to_string(), "arg".to_string()];
+            let result = parse_command(&tokens);
+            // Some commands reject the extra argument, but none may fall through to being
+            // executed as a query of the same name.
+            if let Ok(Command {
+                command: CommandType::Query(query),
+            }) = result
+                && query.command == *name
+            {
+                panic!("built-in command {name} was parsed as a query");
+            }
+        }
+    }
+
+    fn tokens(input: &str) -> Vec<String> {
+        tokenize_command(input).unwrap()
+    }
+
+    #[test]
+    fn parse_command_handles_builtins() {
+        assert!(matches!(
+            parse_command(&tokens("PING")).unwrap().command,
+            CommandType::Ping
+        ));
+        assert!(matches!(
+            parse_command(&tokens("version")).unwrap().command,
+            CommandType::Version
+        ));
+        assert!(matches!(
+            parse_command(&tokens("refresh")).unwrap().command,
+            CommandType::Refresh
+        ));
+        assert!(matches!(
+            parse_command(&tokens("exit")).unwrap().command,
+            CommandType::Exit
+        ));
+        assert!(matches!(
+            parse_command(&tokens("help")).unwrap().command,
+            CommandType::Help
+        ));
+        assert!(matches!(
+            parse_command(&tokens("list")).unwrap().command,
+            CommandType::Queries
+        ));
+        assert!(matches!(
+            parse_command(&tokens("queries")).unwrap().command,
+            CommandType::Queries
+        ));
+        assert!(matches!(
+            parse_command(&tokens("plugins")).unwrap().command,
+            CommandType::Module(ModuleCommand::List)
+        ));
+    }
+
+    #[test]
+    fn parse_command_rejects_empty_input() {
+        assert!(parse_command(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_command_query_keyword_requires_a_name() {
+        let err = parse_command(&tokens("query")).unwrap_err().to_string();
+        assert!(err.contains("query <name>"), "{err}");
+    }
+
+    #[test]
+    fn parse_command_query_keyword_and_bare_query_parse_arguments() {
+        for input in [
+            "query check_cpu warning=80 show-all",
+            "check_cpu warning=80 show-all",
+        ] {
+            match parse_command(&tokens(input)).unwrap().command {
+                CommandType::Query(query) => {
+                    assert_eq!(query.command, "check_cpu");
+                    assert_eq!(
+                        query.args,
+                        vec![
+                            ("warning".to_string(), "80".to_string()),
+                            ("show-all".to_string(), String::new()),
+                        ]
+                    );
+                }
+                _ => panic!("{input} did not parse as a query"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_command_load_and_unload_require_exactly_one_module() {
+        assert!(parse_command(&tokens("load")).is_err());
+        assert!(parse_command(&tokens("unload")).is_err());
+        assert!(parse_command(&tokens("load a b")).is_err());
+        assert!(matches!(
+            parse_command(&tokens("load CheckSystem")).unwrap().command,
+            CommandType::Module(ModuleCommand::Load(ref m)) if m == "CheckSystem"
+        ));
+        assert!(matches!(
+            parse_command(&tokens("unload CheckSystem")).unwrap().command,
+            CommandType::Module(ModuleCommand::Unload(ref m)) if m == "CheckSystem"
+        ));
+    }
+
+    #[test]
+    fn parse_command_modules_subcommands() {
+        assert!(matches!(
+            parse_command(&tokens("modules")).unwrap().command,
+            CommandType::Module(ModuleCommand::List)
+        ));
+        assert!(matches!(
+            parse_command(&tokens("modules list")).unwrap().command,
+            CommandType::Module(ModuleCommand::List)
+        ));
+        assert!(matches!(
+            parse_command(&tokens("modules load X")).unwrap().command,
+            CommandType::Module(ModuleCommand::Load(ref m)) if m == "X"
+        ));
+        assert!(parse_command(&tokens("modules load")).is_err());
+        assert!(parse_command(&tokens("modules bogus")).is_err());
+    }
+
+    #[test]
+    fn parse_command_history_subcommands() {
+        assert!(matches!(
+            parse_command(&tokens("history")).unwrap().command,
+            CommandType::History(HistoryCommand::List)
+        ));
+        assert!(matches!(
+            parse_command(&tokens("history clear")).unwrap().command,
+            CommandType::History(HistoryCommand::Clear)
+        ));
+        assert!(matches!(
+            parse_command(&tokens("history delete 3")).unwrap().command,
+            CommandType::History(HistoryCommand::Delete(3))
+        ));
+        assert!(parse_command(&tokens("history delete")).is_err());
+        assert!(parse_command(&tokens("history delete x")).is_err());
+        assert!(parse_command(&tokens("history bogus")).is_err());
+    }
+
+    #[test]
+    fn history_delete_out_of_range_does_not_panic() {
+        let mut input = CommandInput::new(vec!["one".into(), "two".into()]);
+        let result = input.handle_history(HistoryCommand::Delete(5));
+        assert!(result[0].contains("Invalid history index"), "{result:?}");
+        assert_eq!(
+            input.get_history(),
+            vec!["one".to_string(), "two".to_string()]
+        );
+
+        let result = input.handle_history(HistoryCommand::Delete(0));
+        assert_eq!(result, vec!["History deleted".to_string()]);
+        assert_eq!(input.get_history(), vec!["two".to_string()]);
     }
 }
