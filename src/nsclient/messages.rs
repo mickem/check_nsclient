@@ -161,7 +161,7 @@ pub struct FlatSettingsDescription {
     pub is_sample_key: bool,
     #[tabled()]
     pub is_template_key: bool,
-    #[tabled()]
+    #[tabled(rename = "type")]
     #[serde(rename = "type")]
     pub value_type: String,
     #[tabled()]

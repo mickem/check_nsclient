@@ -145,6 +145,90 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn options(profile: Option<&str>, command: NSClientCommands) -> NSClientCommandOptions {
+        NSClientCommandOptions {
+            command,
+            timeout_s: 30,
+            user_agent: "nscp-client".to_owned(),
+            profile: profile.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn preprocess_url_ensures_single_trailing_slash() {
+        assert_eq!(preprocess_url("https://host:8443"), "https://host:8443/");
+        assert_eq!(preprocess_url("https://host:8443/"), "https://host:8443/");
+        assert_eq!(preprocess_url("https://host:8443///"), "https://host:8443/");
+    }
+
+    #[test]
+    fn connection_options_come_from_cli_args() {
+        let args = NSClientCommandOptions {
+            command: NSClientCommands::Ping {},
+            timeout_s: 7,
+            user_agent: "custom-agent".into(),
+            profile: None,
+        };
+        let options = ConnectionOptions::from_args(&args);
+        assert_eq!(options.timeout_s, 7);
+        assert_eq!(options.user_agent, "custom-agent");
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_reports_unknown_profile() {
+        let tmp = mock_test_config();
+        let err = build_client_from_profile(&options(Some("nope"), NSClientCommands::Ping {}))
+            .err()
+            .expect("unknown profile must fail");
+        assert_eq!(err.to_string(), "NSClient++ profile 'nope' not found.");
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_reports_missing_default() {
+        let tmp = mock_test_config();
+        let err = build_client_from_profile(&options(None, NSClientCommands::Ping {}))
+            .err()
+            .expect("missing default must fail");
+        assert!(
+            err.to_string()
+                .starts_with("No default NSClient++ profile set"),
+            "{err}"
+        );
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_uses_default_profile() {
+        let tmp = mock_test_config();
+        add_nsclient_profile("dflt", "http://localhost:1", false, "u", "p", "k", None).unwrap();
+        assert!(build_client_from_profile(&options(None, NSClientCommands::Ping {})).is_ok());
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_reports_missing_ca_file() {
+        let tmp = mock_test_config();
+        add_nsclient_profile(
+            "ca",
+            "http://localhost:1",
+            false,
+            "u",
+            "p",
+            "k",
+            Some("/definitely/not/here.pem".into()),
+        )
+        .unwrap();
+        assert!(
+            build_client_from_profile(&options(Some("ca"), NSClientCommands::Ping {})).is_err()
+        );
+        drop(tmp);
+    }
+
     #[tokio::test]
     #[serial_test::serial(config)]
     async fn test_ping() {
