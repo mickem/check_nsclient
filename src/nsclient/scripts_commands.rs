@@ -31,6 +31,39 @@ pub async fn route_script_commands(
             ),
             Err(e) => anyhow::bail!("Failed to fetch scripts for runtime {runtime}: {:#}", e),
         },
+        // The script endpoints answer with plain text (a definition, or a short
+        // confirmation), so the body is printed as-is in every output format.
+        ScriptsCommand::Show { runtime, script } => match api.get_script(runtime, script).await {
+            Ok(body) => {
+                output.print(body.trim_end());
+                Ok(())
+            }
+            Err(e) => anyhow::bail!("Failed to fetch script {script} ({runtime}): {:#}", e),
+        },
+        ScriptsCommand::Add {
+            runtime,
+            script,
+            file,
+        } => {
+            let content = std::fs::read_to_string(file)
+                .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
+            match api.add_script(runtime, script, content).await {
+                Ok(body) => {
+                    output.print(body.trim_end());
+                    Ok(())
+                }
+                Err(e) => anyhow::bail!("Failed to add script {script} ({runtime}): {:#}", e),
+            }
+        }
+        ScriptsCommand::Delete { runtime, script } => {
+            match api.delete_script(runtime, script).await {
+                Ok(body) => {
+                    output.print(body.trim_end());
+                    Ok(())
+                }
+                Err(e) => anyhow::bail!("Failed to delete script {script} ({runtime}): {:#}", e),
+            }
+        }
     }
 }
 
@@ -143,6 +176,123 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.borrow().as_str(), "- check_a.py\n\n");
+    }
+
+    #[tokio::test]
+    async fn show_prints_the_definition_verbatim() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_script()
+            .withf(|runtime, script| runtime == "ext" && script == "check_probe")
+            .returning(|_, _| Ok("scripts/check_probe.sh --arg  \n".to_string()));
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_script_commands(
+            output,
+            Box::new(api),
+            &ScriptsCommand::Show {
+                runtime: "ext".into(),
+                script: "check_probe".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.borrow().as_str(), "scripts/check_probe.sh --arg\n");
+    }
+
+    #[tokio::test]
+    async fn add_uploads_the_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("check_probe.sh");
+        std::fs::write(&file, "echo OK\n").unwrap();
+
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_add_script()
+            .withf(|runtime, script, content| {
+                runtime == "ext" && script == "check_probe" && content == "echo OK\n"
+            })
+            .times(1)
+            .returning(|_, _, _| Ok("Added check_probe".to_string()));
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_script_commands(
+            output,
+            Box::new(api),
+            &ScriptsCommand::Add {
+                runtime: "ext".into(),
+                script: "check_probe".into(),
+                file: file.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.borrow().as_str(), "Added check_probe\n");
+    }
+
+    #[tokio::test]
+    async fn add_reports_a_missing_file_without_calling_the_api() {
+        let api = MockApiClientApiImpl::new();
+        let (output, _) = rendering(OutputFormat::Text);
+
+        let err = route_script_commands(
+            output,
+            Box::new(api),
+            &ScriptsCommand::Add {
+                runtime: "ext".into(),
+                script: "check_probe".into(),
+                file: "definitely/not/here.sh".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("Failed to read definitely/not/here.sh"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_prints_the_confirmation() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_delete_script()
+            .withf(|runtime, script| runtime == "ext" && script == "check_probe")
+            .times(1)
+            .returning(|_, _| Ok("Script file was removed".to_string()));
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_script_commands(
+            output,
+            Box::new(api),
+            &ScriptsCommand::Delete {
+                runtime: "ext".into(),
+                script: "check_probe".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.borrow().as_str(), "Script file was removed\n");
+    }
+
+    #[tokio::test]
+    async fn script_errors_name_the_script_and_runtime() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_script()
+            .returning(|_, _| Err(anyhow!("boom")));
+        let (output, _) = rendering(OutputFormat::Text);
+        let err = route_script_commands(
+            output,
+            Box::new(api),
+            &ScriptsCommand::Show {
+                runtime: "lua".into(),
+                script: "mock".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Failed to fetch script mock (lua): boom");
     }
 
     #[tokio::test]

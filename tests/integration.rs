@@ -1052,6 +1052,84 @@ fn scripts_runtimes_and_scripts() {
     assert!(err.contains("no-such-runtime"), "{err}");
 }
 
+#[test]
+fn scripts_add_show_and_delete_round_trip() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let name = format!("check_it_{}", std::process::id());
+    let dir = TempDir::new().expect("temp dir");
+    let file = dir.path().join("probe.sh");
+    std::fs::write(&file, "#!/bin/sh\necho \"OK: probe\"\nexit 0\n").unwrap();
+
+    let added = client.text(&[
+        "scripts",
+        "add",
+        "--runtime",
+        "ext",
+        &name,
+        "--file",
+        &file.to_string_lossy(),
+    ]);
+    assert!(added.contains(&name), "{added}");
+
+    let listed = client.json(&["scripts", "list", "--runtime", "ext"]);
+    let scripts: Vec<String> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
+    assert!(scripts.contains(&name), "{scripts:?}");
+
+    // The definition points at the file the upload created.
+    let shown = client.text(&["scripts", "show", "--runtime", "ext", &name]);
+    assert!(shown.contains(&name), "{shown}");
+    assert!(
+        !shown.contains('│'),
+        "the definition is plain text: {shown}"
+    );
+
+    let removed = client.text(&["scripts", "delete", "--runtime", "ext", &name]);
+    assert!(removed.to_lowercase().contains("remove"), "{removed}");
+
+    let listed = client.json(&["scripts", "list", "--runtime", "ext"]);
+    let scripts: Vec<String> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !scripts.contains(&name),
+        "still listed after delete: {scripts:?}"
+    );
+}
+
+#[test]
+fn scripts_add_reports_a_missing_file() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.ns(
+        &[],
+        &[
+            "scripts",
+            "add",
+            "--runtime",
+            "ext",
+            "check_missing",
+            "--file",
+            "definitely/not/here.sh",
+        ],
+    );
+    let err = assert_failure(&out, "scripts add with a missing file");
+    assert!(
+        err.contains("Failed to read definitely/not/here.sh"),
+        "{err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // settings
 // ---------------------------------------------------------------------------

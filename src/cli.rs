@@ -291,11 +291,39 @@ pub enum LogsCommand {
 
 #[derive(Subcommand)]
 pub enum ScriptsCommand {
-    /// List scripts
+    /// List the available script runtimes
     ListRuntimes {},
+    /// List the scripts of a runtime
     List {
         #[arg(long)]
         runtime: String,
+    },
+    /// Show a script definition (or the script itself)
+    Show {
+        /// Runtime the script belongs to (ext, lua, py)
+        #[arg(long)]
+        runtime: String,
+        /// Name of the script (or a path such as scripts/check_x.sh)
+        script: String,
+    },
+    /// Upload a script, replacing any existing definition
+    Add {
+        /// Runtime to add the script to (ext, lua, py)
+        #[arg(long)]
+        runtime: String,
+        /// Name to store the script under
+        script: String,
+        /// File to read the script from
+        #[arg(long)]
+        file: String,
+    },
+    /// Delete a script definition (or the script file)
+    Delete {
+        /// Runtime the script belongs to (ext, lua, py)
+        #[arg(long)]
+        runtime: String,
+        /// Name of the script (or a path such as scripts/check_x.sh)
+        script: String,
     },
 }
 

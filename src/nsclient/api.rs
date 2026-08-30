@@ -85,7 +85,15 @@ impl ApiClient {
 
     /// Fetch a response body verbatim (for endpoints that are not JSON).
     async fn get_text(&self, path: &str) -> anyhow::Result<String> {
-        let response = self.send(Method::GET, path, |b| b).await?;
+        self.text(Method::GET, path, |b| b).await
+    }
+
+    /// Send a request whose response is plain text rather than JSON.
+    async fn text<F>(&self, method: Method, path: &str, configure: F) -> anyhow::Result<String>
+    where
+        F: Fn(RequestBuilder) -> RequestBuilder,
+    {
+        let response = self.send(method, path, configure).await?;
         Ok(response.text().await?)
     }
 
@@ -268,6 +276,16 @@ pub trait ApiClientApi: Send + Sync {
     ) -> anyhow::Result<ExecuteNagiosResult>;
     async fn list_script_runtimes(&self) -> anyhow::Result<Vec<ScriptRuntimes>>;
     async fn list_scripts(&self, runtime: &str) -> anyhow::Result<Vec<String>>;
+    /// The definition (or content) of a single script.
+    async fn get_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
+    /// Upload `content` as `script`, replacing an existing definition.
+    async fn add_script(
+        &self,
+        runtime: &str,
+        script: &str,
+        content: String,
+    ) -> anyhow::Result<String>;
+    async fn delete_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
     async fn get_settings_status(&self) -> anyhow::Result<SettingsStatus>;
     async fn get_settings(&self) -> anyhow::Result<Vec<SettingsEntry>>;
     async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
@@ -395,6 +413,29 @@ impl ApiClientApi for ApiClient {
         self.get_json(&format!("api/v2/scripts/{runtime}")).await
     }
 
+    async fn get_script(&self, runtime: &str, script: &str) -> anyhow::Result<String> {
+        self.get_text(&format!("api/v2/scripts/{runtime}/{script}"))
+            .await
+    }
+
+    async fn add_script(
+        &self,
+        runtime: &str,
+        script: &str,
+        content: String,
+    ) -> anyhow::Result<String> {
+        let path = format!("api/v2/scripts/{runtime}/{script}");
+        // The body is the script itself; clone per attempt so a token refresh
+        // can rebuild and resend the request.
+        self.text(Method::PUT, &path, |b| b.body(content.clone()))
+            .await
+    }
+
+    async fn delete_script(&self, runtime: &str, script: &str) -> anyhow::Result<String> {
+        let path = format!("api/v2/scripts/{runtime}/{script}");
+        self.text(Method::DELETE, &path, |b| b).await
+    }
+
     async fn get_settings_status(&self) -> anyhow::Result<SettingsStatus> {
         self.get_json("api/v2/settings/status").await
     }
@@ -499,6 +540,9 @@ pub mod mocks {
             ) -> anyhow::Result<ExecuteNagiosResult>;
             async fn list_script_runtimes(&self) -> anyhow::Result<Vec<ScriptRuntimes>>;
             async fn list_scripts(&self, runtime: &str) -> anyhow::Result<Vec<String>>;
+            async fn get_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
+            async fn add_script(&self, runtime: &str, script: &str, content: String) -> anyhow::Result<String>;
+            async fn delete_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
             async fn get_settings_status(&self) -> anyhow::Result<SettingsStatus>;
             async fn get_settings(&self) -> anyhow::Result<Vec<SettingsEntry>>;
             async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
@@ -842,6 +886,46 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn scripts_are_fetched_uploaded_and_deleted_as_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/scripts/ext/check_probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("scripts/check_probe.sh"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v2/scripts/ext/check_probe"))
+            .and(wiremock::matchers::body_string("echo OK\n"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Added check_probe"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/scripts/ext/check_probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Script was removed"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(
+            api.get_script("ext", "check_probe").await.unwrap(),
+            "scripts/check_probe.sh"
+        );
+        assert_eq!(
+            api.add_script("ext", "check_probe", "echo OK\n".to_string())
+                .await
+                .unwrap(),
+            "Added check_probe"
+        );
+        assert_eq!(
+            api.delete_script("ext", "check_probe").await.unwrap(),
+            "Script was removed"
+        );
     }
 
     #[tokio::test]
