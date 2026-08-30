@@ -1,4 +1,5 @@
 use crate::config;
+use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
     ExecuteNagiosResult, ExecuteResult, ListModulesResult, ListQueriesResult, LogRecord, LogStatus,
@@ -37,6 +38,7 @@ pub struct ApiClient {
     base_url: String,
     auth: RwLock<Auth>,
     id: Option<String>,
+    options: ConnectionOptions,
 }
 
 impl ApiClient {
@@ -45,12 +47,14 @@ impl ApiClient {
         base_url: &str,
         auth: Auth,
         id: Option<String>,
+        options: ConnectionOptions,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             client: builder.build()?,
             base_url: base_url.to_owned(),
             auth: RwLock::new(auth),
             id,
+            options,
         })
     }
 
@@ -105,6 +109,7 @@ impl ApiClient {
             &password,
             profile.insecure,
             profile.ca,
+            &self.options,
         )
         .await?;
         config::update_token(id, &token)?;
@@ -480,11 +485,17 @@ mod tests {
         assert_eq!(page.pages, 0);
     }
 
+    fn options() -> ConnectionOptions {
+        ConnectionOptions {
+            timeout_s: 5,
+            user_agent: "test-agent".into(),
+        }
+    }
+
     fn token_client(url: &str, token: &str, id: Option<&str>) -> Box<dyn ApiClientApi> {
         build_client(
             url,
-            5,
-            "test-agent",
+            &options(),
             Auth::Token(token.to_string()),
             false,
             id.map(|s| s.to_string()),
@@ -528,8 +539,7 @@ mod tests {
 
         let api = build_client(
             &server.uri(),
-            5,
-            "test-agent",
+            &options(),
             Auth::Password("admin".into(), "hunter2".into()),
             false,
             None,
@@ -584,6 +594,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v2/login"))
             .and(header("authorization", "Basic YWRtaW46aHVudGVyMg=="))
+            .and(header("user-agent", "test-agent"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"key": "fresh"})),
             )

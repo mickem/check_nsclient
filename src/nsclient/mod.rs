@@ -26,6 +26,23 @@ use crate::rendering::Rendering;
 use reqwest::Certificate;
 use std::time::Duration;
 
+/// HTTP client settings shared by every request made on behalf of one CLI invocation,
+/// including the login performed when a token has to be refreshed.
+#[derive(Clone, Debug)]
+pub struct ConnectionOptions {
+    pub timeout_s: u64,
+    pub user_agent: String,
+}
+
+impl ConnectionOptions {
+    pub fn from_args(args: &NSClientCommandOptions) -> Self {
+        Self {
+            timeout_s: args.timeout_s,
+            user_agent: args.user_agent.clone(),
+        }
+    }
+}
+
 fn preprocess_url(url: &str) -> String {
     let url = url.trim_end_matches('/');
     format!("{url}/")
@@ -49,8 +66,7 @@ pub fn build_client_from_profile(
     let api_key = config::get_api_key(&profile.id)?;
     build_client(
         &profile.url,
-        args.timeout_s,
-        &args.user_agent,
+        &ConnectionOptions::from_args(args),
         Auth::Token(api_key),
         profile.insecure,
         Some(profile.id.to_owned()),
@@ -60,8 +76,7 @@ pub fn build_client_from_profile(
 
 pub fn build_client(
     url: &str,
-    timeout_s: u64,
-    user_agent: &str,
+    options: &ConnectionOptions,
     auth: Auth,
     insecure: bool,
     profile_id: Option<String>,
@@ -69,15 +84,15 @@ pub fn build_client(
 ) -> anyhow::Result<Box<dyn ApiClientApi>> {
     let url = preprocess_url(url);
     let mut client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_s))
-        .user_agent(user_agent)
+        .timeout(Duration::from_secs(options.timeout_s))
+        .user_agent(&options.user_agent)
         .danger_accept_invalid_certs(insecure);
     if let Some(ca_file) = ca_file {
         let ca_pem = std::fs::read(&ca_file)?;
         let cert = Certificate::from_pem(&ca_pem)?;
         client = client.tls_certs_merge(vec![cert]);
     }
-    let client = ApiClient::new(client, &url, auth, profile_id)?;
+    let client = ApiClient::new(client, &url, auth, profile_id, options.clone())?;
     Ok(Box::new(client))
 }
 
@@ -111,7 +126,9 @@ pub async fn route_ns_client(
         NSClientCommands::Metrics { command } => {
             route_metrics_commands(output, build_client_from_profile(args)?, command).await?
         }
-        NSClientCommands::Auth { command } => route_auth_commands(output, command).await?,
+        NSClientCommands::Auth { command } => {
+            route_auth_commands(output, &ConnectionOptions::from_args(args), command).await?
+        }
         NSClientCommands::Client {} | NSClientCommands::Test {} => {
             client::run_client(build_client_from_profile(args)?).await?
         }

@@ -1,9 +1,14 @@
 use crate::cli::AuthCommand;
 use crate::config;
+use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::rendering::Rendering;
 
-pub async fn route_auth_commands(output: Rendering, command: &AuthCommand) -> anyhow::Result<()> {
+pub async fn route_auth_commands(
+    output: Rendering,
+    options: &ConnectionOptions,
+    command: &AuthCommand,
+) -> anyhow::Result<()> {
     match command {
         AuthCommand::Login {
             id,
@@ -13,8 +18,15 @@ pub async fn route_auth_commands(output: Rendering, command: &AuthCommand) -> an
             insecure,
             ca,
         } => {
-            let key = match login_and_fetch_key(url, username, password, *insecure, ca.to_owned())
-                .await
+            let key = match login_and_fetch_key(
+                url,
+                username,
+                password,
+                *insecure,
+                ca.to_owned(),
+                options,
+            )
+            .await
             {
                 Ok(key) => key,
                 Err(e) => anyhow::bail!("Failed to login: {:#}", e),
@@ -23,8 +35,8 @@ pub async fn route_auth_commands(output: Rendering, command: &AuthCommand) -> an
                 id,
                 url,
                 *insecure,
-                &username,
-                &password,
+                username,
+                password,
                 &key,
                 ca.to_owned(),
             ) {
@@ -45,6 +57,7 @@ pub async fn route_auth_commands(output: Rendering, command: &AuthCommand) -> an
                 &password,
                 profile.insecure,
                 profile.ca,
+                options,
             )
             .await
             {
