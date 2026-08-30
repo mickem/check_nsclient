@@ -299,9 +299,10 @@ pub enum AuthCommand {
         /// Username to login with
         #[arg(long, default_value = "admin")]
         username: String,
-        /// Password to login with
-        #[arg(long)]
-        password: String,
+        /// Password to login with (prompted for when omitted; prefer the environment
+        /// variable or the prompt over the flag to keep it out of the shell history)
+        #[arg(long, env = "CHECK_NSCLIENT_PASSWORD", hide_env_values = true)]
+        password: Option<String>,
         /// Allow insecure TLS connections (i.e. dont validate certificate)
         #[arg(long)]
         insecure: bool,
@@ -431,7 +432,7 @@ mod tests {
                     assert_eq!(id, "default");
                     assert_eq!(url, "https://localhost:8443");
                     assert_eq!(username, "admin");
-                    assert_eq!(password, "pw");
+                    assert_eq!(password.as_deref(), Some("pw"));
                     assert!(!insecure);
                     assert!(ca.is_none());
                 }
@@ -439,6 +440,35 @@ mod tests {
             },
             _ => panic!("not an nsclient command"),
         }
+    }
+
+    fn login_password(cli: &Cli) -> Option<String> {
+        match &cli.command {
+            Commands::NSClient(opts) => match &opts.command {
+                NSClientCommands::Auth {
+                    command: AuthCommand::Login { password, .. },
+                } => password.clone(),
+                _ => panic!("not a login command"),
+            },
+            _ => panic!("not an nsclient command"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn auth_login_password_is_optional_and_read_from_environment() {
+        unsafe { std::env::remove_var("CHECK_NSCLIENT_PASSWORD") };
+        let cli = parse(&["nsclient", "auth", "login"]);
+        assert_eq!(login_password(&cli), None);
+
+        unsafe { std::env::set_var("CHECK_NSCLIENT_PASSWORD", "from-env") };
+        let cli = parse(&["nsclient", "auth", "login"]);
+        assert_eq!(login_password(&cli).as_deref(), Some("from-env"));
+
+        // An explicit flag wins over the environment.
+        let cli = parse(&["nsclient", "auth", "login", "--password", "flag"]);
+        assert_eq!(login_password(&cli).as_deref(), Some("flag"));
+        unsafe { std::env::remove_var("CHECK_NSCLIENT_PASSWORD") };
     }
 
     #[test]

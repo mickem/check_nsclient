@@ -4,6 +4,19 @@ use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::rendering::Rendering;
 
+/// Use the password given on the command line / environment, or prompt for it.
+fn resolve_password(password: &Option<String>) -> anyhow::Result<String> {
+    if let Some(password) = password {
+        return Ok(password.clone());
+    }
+    let password = rpassword::prompt_password("Password: ")
+        .map_err(|e| anyhow::anyhow!("Failed to read password: {e}"))?;
+    if password.is_empty() {
+        anyhow::bail!("No password given");
+    }
+    Ok(password)
+}
+
 pub async fn route_auth_commands(
     output: Rendering,
     options: &ConnectionOptions,
@@ -18,10 +31,11 @@ pub async fn route_auth_commands(
             insecure,
             ca,
         } => {
+            let password = resolve_password(password)?;
             let key = match login_and_fetch_key(
                 url,
                 username,
-                password,
+                &password,
                 *insecure,
                 ca.to_owned(),
                 options,
@@ -36,7 +50,7 @@ pub async fn route_auth_commands(
                 url,
                 *insecure,
                 username,
-                password,
+                &password,
                 &key,
                 ca.to_owned(),
             ) {
