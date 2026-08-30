@@ -289,6 +289,26 @@ pub struct ListQueriesResult {
     pub plugin: String,
 }
 
+/// A query alias: an admin defined wrapper around a real check command.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct AliasResult {
+    #[tabled()]
+    pub name: String,
+    #[tabled()]
+    pub title: String,
+    #[tabled()]
+    pub description: String,
+    #[tabled()]
+    pub plugin: String,
+    /// Aliases are executed through the regular queries endpoint.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub query_url: String,
+    #[tabled(skip)]
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Tabled)]
 pub struct QueryResult {
     #[tabled()]

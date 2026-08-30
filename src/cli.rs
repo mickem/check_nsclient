@@ -81,6 +81,11 @@ pub enum NSClientCommands {
         #[command(subcommand)]
         command: QueriesCommand,
     },
+    /// List query aliases
+    Aliases {
+        #[command(subcommand)]
+        command: AliasesCommand,
+    },
     /// Inspect/acknowledge logs
     Logs {
         #[command(subcommand)]
@@ -206,6 +211,19 @@ pub enum QueriesCommand {
         /// Additional query options (use KEY=VALUE or --KEY=VALUE, values keep order specified)
         #[arg(value_name = "KEY=VALUE", value_parser = parse_kv_option, allow_hyphen_values = true)]
         args: Vec<(String, String)>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AliasesCommand {
+    /// List aliases
+    List {
+        /// List all aliases (including modules that are not loaded)
+        #[arg(short, long)]
+        all: bool,
+        /// Show all information (same as --output-long)
+        #[arg(short, long)]
+        long: bool,
     },
 }
 

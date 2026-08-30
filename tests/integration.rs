@@ -785,6 +785,46 @@ fn unknown_query_yields_unknown_status() {
 }
 
 // ---------------------------------------------------------------------------
+// aliases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aliases_list() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let aliases = client.json(&["aliases", "list"]);
+    let list = aliases.as_array().expect("an array of aliases");
+    assert!(
+        !list.is_empty(),
+        "CheckExternalScripts ships default aliases: {aliases}"
+    );
+    let alias = &list[0];
+    for key in ["name", "title", "description", "plugin", "query_url"] {
+        assert!(alias[key].is_string(), "missing {key} in {alias}");
+    }
+    assert!(
+        alias["query_url"].as_str().unwrap().contains("/queries/"),
+        "an alias is executed through the queries endpoint: {alias}"
+    );
+
+    let names = names(&aliases, "name");
+    let text = client.text(&["aliases", "list"]);
+    assert!(text.contains("│ name "), "{text}");
+    assert!(text.contains(&names[0]), "{text}");
+    assert!(
+        !text.contains("description"),
+        "description is hidden by default: {text}"
+    );
+    let long = client.text(&["aliases", "list", "--long"]);
+    assert!(long.contains("description"), "{long}");
+
+    // An alias resolves through the regular queries flow.
+    let all = client.json(&["aliases", "list", "--all"]);
+    assert!(all.as_array().unwrap().len() >= list.len());
+}
+
+// ---------------------------------------------------------------------------
 // logs
 // ---------------------------------------------------------------------------
 

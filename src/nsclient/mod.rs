@@ -1,3 +1,4 @@
+mod alias_commands;
 mod api;
 mod auth_commands;
 pub mod client;
@@ -13,6 +14,7 @@ mod settings_commands;
 
 use crate::cli::{NSClientCommandOptions, NSClientCommands};
 use crate::config;
+use crate::nsclient::alias_commands::route_alias_commands;
 use crate::nsclient::api::{ApiClient, ApiClientApi, Auth};
 use crate::nsclient::auth_commands::route_auth_commands;
 use crate::nsclient::generic_commands::{handle_ping_command, handle_version_command};
@@ -126,6 +128,9 @@ pub async fn route_ns_client(
         }
         NSClientCommands::Queries { command } => {
             return route_query_commands(output, build_client_from_profile(args)?, command).await;
+        }
+        NSClientCommands::Aliases { command } => {
+            route_alias_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Logs { command } => {
             route_log_commands(output, build_client_from_profile(args)?, command).await?

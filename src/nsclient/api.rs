@@ -3,10 +3,10 @@ use crate::debug;
 use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
-    ExecuteNagiosResult, ExecuteResult, ListModulesResult, ListQueriesResult, LogRecord, LogStatus,
-    LoginResponse, Metrics, ModulesResult, PaginatedResponse, PingResult, QueryResult,
-    ScriptRuntimes, SettingsCommandAction, SettingsCommandRequest, SettingsDescription,
-    SettingsEntry, SettingsStatus,
+    AliasResult, ExecuteNagiosResult, ExecuteResult, ListModulesResult, ListQueriesResult,
+    LogRecord, LogStatus, LoginResponse, Metrics, ModulesResult, PaginatedResponse, PingResult,
+    QueryResult, ScriptRuntimes, SettingsCommandAction, SettingsCommandRequest,
+    SettingsDescription, SettingsEntry, SettingsStatus,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -253,6 +253,7 @@ pub trait ApiClientApi: Send + Sync {
     async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult>;
     async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
     async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
+    async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
     async fn execute_query(
         &self,
@@ -351,6 +352,11 @@ impl ApiClientApi for ApiClient {
         self.get_with_query("api/v2/queries", &params).await
     }
 
+    async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>> {
+        let params = [("all".to_string(), all.to_string())];
+        self.get_with_query("api/v2/aliases", &params).await
+    }
+
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult> {
         self.get_json(&format!("api/v2/queries/{id}")).await
     }
@@ -444,6 +450,7 @@ pub mod mocks {
             async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult>;
             async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
             async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
+            async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
             async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
             async fn execute_query(
                 &self,
@@ -794,6 +801,36 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn list_aliases_passes_the_all_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/aliases"))
+            .and(query_param("all", "true"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "name": "alias_cpu",
+                    "title": "alias_cpu",
+                    "description": "Alias for: check_cpu",
+                    "plugin": "CheckExternalScripts",
+                    "query_url": "https://localhost:8443/api/v2/queries/alias_cpu/",
+                    "metadata": {}
+                }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let aliases = api.list_aliases(&true).await.unwrap();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].name, "alias_cpu");
+        assert_eq!(
+            aliases[0].query_url,
+            "https://localhost:8443/api/v2/queries/alias_cpu/"
+        );
     }
 
     #[tokio::test]
