@@ -196,6 +196,18 @@ pub enum ModulesCommand {
     Disable { id: String },
     /// Load and enable a module so it can be used.
     Use { id: String },
+    /// Upload a module archive and load it.
+    ///
+    /// The archive is stored as <module-path>/<ID>.zip on the server and loaded
+    /// immediately, so its code runs as the user the service runs as. Only
+    /// upload archives you trust.
+    Upload {
+        /// Name to store the module under
+        id: String,
+        /// Module archive (.zip) to upload
+        #[arg(long)]
+        file: String,
+    },
 }
 
 #[derive(Subcommand)]

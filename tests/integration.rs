@@ -628,6 +628,68 @@ fn modules_load_unload_enable_disable_cycle() {
 }
 
 #[test]
+fn modules_upload_accepts_an_archive_and_rejects_a_bad_name() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    // A well formed but empty zip: the server stores and tries to load it,
+    // which exercises the upload path without running any foreign code.
+    let dir = TempDir::new().expect("temp dir");
+    let archive = dir.path().join("ItProbeModule.zip");
+    std::fs::write(
+        &archive,
+        [
+            0x50u8, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    )
+    .unwrap();
+
+    let out = client.ns(
+        &[],
+        &[
+            "modules",
+            "upload",
+            "ItProbeModule",
+            "--file",
+            &archive.to_string_lossy(),
+        ],
+    );
+    assert_success(&out, "modules upload");
+    assert_eq!(
+        stdout(&out).trim(),
+        "Uploaded and loaded module ItProbeModule"
+    );
+
+    // The server refuses names that would escape the module directory.
+    let out = client.ns(
+        &[],
+        &[
+            "modules",
+            "upload",
+            "../evil",
+            "--file",
+            &archive.to_string_lossy(),
+        ],
+    );
+    let err = assert_failure(&out, "modules upload with a traversing name");
+    assert!(err.contains("Failed to upload module ../evil"), "{err}");
+
+    // A missing archive is caught before anything is sent.
+    let out = client.ns(
+        &[],
+        &[
+            "modules",
+            "upload",
+            "ItProbeModule",
+            "--file",
+            "no/such.zip",
+        ],
+    );
+    let err = assert_failure(&out, "modules upload with a missing file");
+    assert!(err.contains("Failed to read no/such.zip"), "{err}");
+}
+
+#[test]
 fn unknown_module_is_an_error() {
     let target = require_target!();
     let client = shared(&target);

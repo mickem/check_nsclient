@@ -56,6 +56,17 @@ pub async fn route_module_commands(
             }
             Err(e) => anyhow::bail!("Failed to disable module {id}: {:#}", e),
         },
+        ModulesCommand::Upload { id, file } => {
+            let archive =
+                std::fs::read(file).map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
+            match api.upload_module(id, archive).await {
+                Ok(()) => {
+                    output.print(&format!("Uploaded and loaded module {id}"));
+                    Ok(())
+                }
+                Err(e) => anyhow::bail!("Failed to upload module {id}: {:#}", e),
+            }
+        }
         &ModulesCommand::Use { id } => {
             if let Err(e) = api.module_command(id, "load").await {
                 anyhow::bail!("Failed to load module {id}: {:#}", e);
@@ -304,6 +315,85 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("Failed to load module M"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn upload_sends_the_archive_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("MyModule.zip");
+        std::fs::write(&file, [0x50u8, 0x4b, 0x05, 0x06]).unwrap();
+
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_upload_module()
+            .withf(|id, archive| id == "MyModule" && archive.as_slice() == [0x50, 0x4b, 0x05, 0x06])
+            .times(1)
+            .returning(|_, _| Ok(()));
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_module_commands(
+            output,
+            Box::new(api),
+            &ModulesCommand::Upload {
+                id: "MyModule".into(),
+                file: file.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            out.borrow().as_str(),
+            "Uploaded and loaded module MyModule\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_reports_a_missing_file_without_calling_the_api() {
+        let api = MockApiClientApiImpl::new();
+        let (output, _) = rendering(OutputFormat::Text);
+
+        let err = route_module_commands(
+            output,
+            Box::new(api),
+            &ModulesCommand::Upload {
+                id: "MyModule".into(),
+                file: "definitely/not/here.zip".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("Failed to read definitely/not/here.zip"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_error_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("m.zip");
+        std::fs::write(&file, b"x").unwrap();
+
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_upload_module()
+            .returning(|_, _| Err(anyhow!("Invalid module name")));
+        let (output, _) = rendering(OutputFormat::Text);
+
+        let err = route_module_commands(
+            output,
+            Box::new(api),
+            &ModulesCommand::Upload {
+                id: "m".into(),
+                file: file.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Failed to upload module m: Invalid module name"
+        );
     }
 
     #[tokio::test]

@@ -266,6 +266,10 @@ pub trait ApiClientApi: Send + Sync {
     async fn list_modules(&self, all: &bool) -> anyhow::Result<Vec<ListModulesResult>>;
     async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult>;
     async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
+    /// Upload a module archive and load it. The server stores it as
+    /// `${module-path}/<id>.zip` and then loads it, so the archive runs as the
+    /// service user.
+    async fn upload_module(&self, id: &str, archive: Vec<u8>) -> anyhow::Result<()>;
     async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
     async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
@@ -396,6 +400,14 @@ impl ApiClientApi for ApiClient {
     async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()> {
         let path = format!("api/v2/modules/{id}/commands/{command}");
         self.get_empty(&path).await
+    }
+
+    async fn upload_module(&self, id: &str, archive: Vec<u8>) -> anyhow::Result<()> {
+        let path = format!("api/v2/modules/{id}");
+        // Cloned per attempt so a token refresh can rebuild and resend it.
+        self.send(Method::POST, &path, |b| b.body(archive.clone()))
+            .await
+            .map(|_| ())
     }
 
     async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>> {
@@ -573,6 +585,7 @@ pub mod mocks {
             async fn list_modules(&self, all: &bool) -> anyhow::Result<Vec<ListModulesResult>>;
             async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult>;
             async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
+            async fn upload_module(&self, id: &str, archive: Vec<u8>) -> anyhow::Result<()>;
             async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
             async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
             async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
@@ -936,6 +949,38 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn upload_module_posts_the_archive_bytes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/modules/MyModule"))
+            .and(wiremock::matchers::body_bytes(vec![0x50, 0x4b, 0x05, 0x06]))
+            // The server answers with an empty body on success.
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        api.upload_module("MyModule", vec![0x50, 0x4b, 0x05, 0x06])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_module_surfaces_a_rejected_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/modules/bad"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("Invalid module name"))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let err = api.upload_module("bad", vec![1, 2, 3]).await.unwrap_err();
+        assert!(err.to_string().contains("Invalid module name"), "{err}");
     }
 
     #[tokio::test]
