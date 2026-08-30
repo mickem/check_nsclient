@@ -81,7 +81,7 @@ impl Rendering {
                 self.sink.render(&output);
             }
             OutputFormat::Yaml => {
-                let output = serde_yaml::to_string(object)?;
+                let output = serde_yaml_ng::to_string(object)?;
                 self.sink.render(&output);
             }
         }
@@ -129,7 +129,7 @@ impl Rendering {
                 self.sink.render(&output);
             }
             OutputFormat::Yaml => {
-                let output = serde_yaml::to_string(object)?;
+                let output = serde_yaml_ng::to_string(object)?;
                 self.sink.render(&output);
             }
         }
