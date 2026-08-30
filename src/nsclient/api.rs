@@ -266,6 +266,8 @@ pub trait ApiClientApi: Send + Sync {
     async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()>;
     async fn settings_command(&self, command: SettingsCommandAction) -> anyhow::Result<()>;
     async fn login(&self) -> anyhow::Result<LoginResponse>;
+    /// Revoke the API token this client authenticates with (server side).
+    async fn logout(&self) -> anyhow::Result<()>;
     async fn get_metrics(&self) -> anyhow::Result<Metrics>;
 }
 
@@ -397,6 +399,10 @@ impl ApiClientApi for ApiClient {
         self.get_json("api/v2/login").await
     }
 
+    async fn logout(&self) -> anyhow::Result<()> {
+        self.delete("api/v2/login").await
+    }
+
     async fn get_metrics(&self) -> anyhow::Result<Metrics> {
         self.get_json("api/v2/metrics").await
     }
@@ -448,6 +454,7 @@ pub mod mocks {
                 command: SettingsCommandAction,
             ) -> anyhow::Result<()>;
             async fn login(&self) -> anyhow::Result<LoginResponse>;
+            async fn logout(&self) -> anyhow::Result<()>;
             async fn get_metrics(&self) -> anyhow::Result<Metrics>;
         }
     }
@@ -774,6 +781,23 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn logout_deletes_the_login_resource() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/login"))
+            .and(header("authorization", "Bearer secret"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        api.logout().await.unwrap();
     }
 
     #[tokio::test]

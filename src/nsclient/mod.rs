@@ -63,14 +63,22 @@ pub fn build_client_from_profile(
             ),
         },
     };
+    build_client_for_profile(&profile, &ConnectionOptions::from_args(args))
+}
+
+/// Build a client that authenticates with the stored API key of `profile`.
+pub fn build_client_for_profile(
+    profile: &config::NSClientProfile,
+    options: &ConnectionOptions,
+) -> anyhow::Result<Box<dyn ApiClientApi>> {
     let api_key = config::get_api_key(&profile.id)?;
     build_client(
         &profile.url,
-        &ConnectionOptions::from_args(args),
+        options,
         Auth::Token(api_key),
         profile.insecure,
         Some(profile.id.to_owned()),
-        profile.ca,
+        profile.ca.clone(),
     )
 }
 

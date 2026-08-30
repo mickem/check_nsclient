@@ -371,6 +371,38 @@ fn logout_removes_profile_and_credentials() {
 }
 
 #[test]
+fn logout_revokes_the_token_on_the_server() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let token = stored_token(&client.profile);
+    assert_eq!(
+        info_status_with_token(&target.url, &token),
+        200,
+        "the freshly issued token should be accepted"
+    );
+
+    let out = client.run(&["nsclient", "auth", "logout", &client.profile]);
+    assert_success(&out, "auth logout");
+    assert!(
+        stdout(&out).contains("Successfully logged out"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("Warning"),
+        "revoking should have succeeded: {}",
+        stdout(&out)
+    );
+
+    let status = info_status_with_token(&target.url, &token);
+    assert!(
+        status == 401 || status == 403,
+        "token is still accepted after logout (http {status})"
+    );
+}
+
+#[test]
 fn insecure_flag_is_required_for_self_signed_certificate() {
     let target = require_target!();
     let client = Client::login(&target);
