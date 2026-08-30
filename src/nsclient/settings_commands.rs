@@ -23,7 +23,7 @@ pub async fn route_settings_commands(
             Ok(status) => output.render_single(&status, SettingsStatus::to_dict),
             Err(e) => anyhow::bail!("Failed to fetch settings status: {:#}", e),
         },
-        SettingsCommand::List {} => match api.get_settings().await {
+        SettingsCommand::List { path } => match api.get_settings(path).await {
             Ok(settings) => output.render_rows(&settings, &false, &[]),
             Err(e) => anyhow::bail!("Failed to fetch settings entries: {:#}", e),
         },
@@ -60,6 +60,25 @@ pub async fn route_settings_commands(
                 Err(e) => anyhow::bail!("Failed to update setting {path}/{key}: {:#}", e),
             }
         }
+        SettingsCommand::Delete {
+            path,
+            key,
+            all_keys: _,
+        } => {
+            // clap guarantees exactly one of --key / --all-keys, so a missing
+            // key here always means "remove the whole section".
+            match api.delete_settings(path, key.clone()).await {
+                Ok(result) => {
+                    let target = match key {
+                        Some(key) => format!("{path}/{key}"),
+                        None => path.clone(),
+                    };
+                    output.print(&format!("Removed {} key(s) from {target}", result.keys));
+                    Ok(())
+                }
+                Err(e) => anyhow::bail!("Failed to remove setting {path}: {:#}", e),
+            }
+        }
         SettingsCommand::Command { action } => match api.settings_command(map_action(action)).await
         {
             Ok(()) => {
@@ -76,6 +95,7 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
+    use crate::nsclient::messages::SettingsDeleteResult;
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;
@@ -137,18 +157,26 @@ mod tests {
     #[tokio::test]
     async fn list_text_renders_entries() {
         let mut api = MockApiClientApiImpl::new();
-        api.expect_get_settings().returning(|| {
-            Ok(vec![SettingsEntry {
-                key: "port".into(),
-                path: "/settings/WEB/server".into(),
-                value: "8443".into(),
-            }])
-        });
+        api.expect_get_settings()
+            .withf(|path| path.is_empty())
+            .returning(|_| {
+                Ok(vec![SettingsEntry {
+                    key: "port".into(),
+                    path: "/settings/WEB/server".into(),
+                    value: "8443".into(),
+                }])
+            });
         let (output, out) = rendering(OutputFormat::Text, false);
 
-        route_settings_commands(output, Box::new(api), &SettingsCommand::List {})
-            .await
-            .unwrap();
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::List {
+                path: String::new(),
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             out.borrow().as_str(),
@@ -156,6 +184,113 @@ mod tests {
              |------|----------------------|-------|\n\
              | port | /settings/WEB/server | 8443  |\n"
         );
+    }
+
+    #[tokio::test]
+    async fn list_passes_the_path_filter() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_settings()
+            .withf(|path| path == "/settings/default")
+            .times(1)
+            .returning(|_| Ok(vec![]));
+        let (output, _) = rendering(OutputFormat::Text, false);
+
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::List {
+                path: "/settings/default".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_removes_a_single_key() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_delete_settings()
+            .withf(|path, key| path == "/settings/probe" && key.as_deref() == Some("k1"))
+            .times(1)
+            .returning(|_, _| {
+                Ok(SettingsDeleteResult {
+                    status: "success".into(),
+                    keys: 1,
+                    recursive: true,
+                })
+            });
+        let (output, out) = rendering(OutputFormat::Text, false);
+
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Delete {
+                path: "/settings/probe".into(),
+                key: Some("k1".into()),
+                all_keys: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            out.borrow().as_str(),
+            "Removed 1 key(s) from /settings/probe/k1\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_a_whole_section() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_delete_settings()
+            .withf(|path, key| path == "/settings/probe" && key.is_none())
+            .times(1)
+            .returning(|_, _| {
+                Ok(SettingsDeleteResult {
+                    status: "success".into(),
+                    keys: 3,
+                    recursive: true,
+                })
+            });
+        let (output, out) = rendering(OutputFormat::Text, false);
+
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Delete {
+                path: "/settings/probe".into(),
+                key: None,
+                all_keys: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            out.borrow().as_str(),
+            "Removed 3 key(s) from /settings/probe\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_error_is_reported() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_delete_settings()
+            .returning(|_, _| Err(anyhow!("boom")));
+        let (output, _) = rendering(OutputFormat::Text, false);
+
+        let err = route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Delete {
+                path: "/p".into(),
+                key: Some("k".into()),
+                all_keys: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Failed to remove setting /p: boom");
     }
 
     #[tokio::test]

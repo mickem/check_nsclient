@@ -103,6 +103,15 @@ pub struct SettingsEntry {
     pub value: String,
 }
 
+/// What the server removed in response to a settings DELETE.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SettingsDeleteResult {
+    pub status: String,
+    pub keys: u64,
+    #[serde(default)]
+    pub recursive: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SettingsDescription {
     pub default_value: String,

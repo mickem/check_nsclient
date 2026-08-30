@@ -1169,8 +1169,89 @@ fn settings_status_list_and_descriptions() {
     let text = client.text(&["settings", "descriptions"]);
     assert!(text.contains("│ key "), "{text}");
     assert!(!text.contains("default_value"), "hidden by default: {text}");
-    let long = stdout(&client.ns(&["--output-long"], &["settings", "descriptions"]));
-    assert!(long.contains("default_value"), "{long}");
+    let out = client.ns(&["--output-long"], &["settings", "descriptions"]);
+    assert_success(&out, "settings descriptions --output-long");
+    assert!(stdout(&out).contains("default_value"), "{}", stdout(&out));
+}
+
+#[test]
+fn settings_list_can_be_filtered_by_path() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let all = client.json(&["settings", "list"]);
+    let filtered = client.json(&["settings", "list", "--path", "/modules"]);
+    let entries = filtered.as_array().expect("an array of entries");
+    assert!(!entries.is_empty(), "/modules always has keys: {filtered}");
+    assert!(
+        entries.len() < all.as_array().unwrap().len(),
+        "a filtered listing must be smaller than the whole store"
+    );
+    for entry in entries {
+        assert_eq!(entry["path"], "/modules", "{entry}");
+    }
+    assert!(
+        entries.iter().any(|e| e["key"] == "WEBServer"),
+        "{filtered}"
+    );
+}
+
+#[test]
+fn settings_delete_removes_a_key_and_a_section() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let path = format!("/settings/it-delete-{}", std::process::id());
+    let set = |key: &str, value: &str| {
+        assert_success(
+            &client.ns(
+                &[],
+                &[
+                    "settings", "set", "--path", &path, "--key", key, "--value", value,
+                ],
+            ),
+            "settings set",
+        );
+    };
+    let keys = |client: &Client| -> Vec<String> {
+        client
+            .json(&["settings", "list", "--path", &path])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["key"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    set("k1", "v1");
+    set("k2", "v2");
+    let mut present = keys(&client);
+    present.sort();
+    assert_eq!(present, vec!["k1".to_string(), "k2".to_string()]);
+
+    // A single key.
+    let out = client.ns(&[], &["settings", "delete", "--path", &path, "--key", "k1"]);
+    assert_success(&out, "settings delete --key");
+    assert_eq!(
+        stdout(&out).trim(),
+        format!("Removed 1 key(s) from {path}/k1")
+    );
+    assert_eq!(keys(&client), vec!["k2".to_string()]);
+
+    // The whole section.
+    let out = client.ns(&[], &["settings", "delete", "--path", &path, "--all-keys"]);
+    assert_success(&out, "settings delete --all-keys");
+    assert!(
+        stdout(&out).trim().starts_with("Removed "),
+        "{}",
+        stdout(&out)
+    );
+    assert!(keys(&client).is_empty(), "section should be gone");
+
+    // Removing a section needs an explicit opt-in.
+    let out = client.ns(&[], &["settings", "delete", "--path", &path]);
+    let err = assert_failure(&out, "settings delete without --key/--all-keys");
+    assert!(err.contains("--all-keys"), "{err}");
 }
 
 #[test]

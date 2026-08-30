@@ -6,8 +6,8 @@ use crate::nsclient::messages::{
     AliasResult, EventRecord, ExecuteNagiosResult, ExecuteResult, ListModulesResult,
     ListQueriesResult, LogRecord, LogStatus, LoginResponse, MetadataChannel, MetadataResource,
     Metrics, ModulesResult, PaginatedResponse, PingResult, QueryResult, ScriptRuntimes,
-    SettingsCommandAction, SettingsCommandRequest, SettingsDescription, SettingsEntry,
-    SettingsStatus, Tags,
+    SettingsCommandAction, SettingsCommandRequest, SettingsDeleteResult, SettingsDescription,
+    SettingsEntry, SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -287,7 +287,14 @@ pub trait ApiClientApi: Send + Sync {
     ) -> anyhow::Result<String>;
     async fn delete_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
     async fn get_settings_status(&self) -> anyhow::Result<SettingsStatus>;
-    async fn get_settings(&self) -> anyhow::Result<Vec<SettingsEntry>>;
+    /// List the keys under `path` (the whole store when it is empty).
+    async fn get_settings(&self, path: &str) -> anyhow::Result<Vec<SettingsEntry>>;
+    /// Remove a single key, or the whole `path` when `key` is `None`.
+    async fn delete_settings(
+        &self,
+        path: &str,
+        key: Option<String>,
+    ) -> anyhow::Result<SettingsDeleteResult>;
     async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
     async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()>;
     async fn settings_command(&self, command: SettingsCommandAction) -> anyhow::Result<()>;
@@ -440,8 +447,21 @@ impl ApiClientApi for ApiClient {
         self.get_json("api/v2/settings/status").await
     }
 
-    async fn get_settings(&self) -> anyhow::Result<Vec<SettingsEntry>> {
-        self.get_json("api/v2/settings").await
+    async fn get_settings(&self, path: &str) -> anyhow::Result<Vec<SettingsEntry>> {
+        self.get_json(&format!("api/v2/settings{path}")).await
+    }
+
+    async fn delete_settings(
+        &self,
+        path: &str,
+        key: Option<String>,
+    ) -> anyhow::Result<SettingsDeleteResult> {
+        let url = format!("api/v2/settings{path}");
+        let query: Vec<(String, String)> = key
+            .map(|key| vec![("key".to_string(), key)])
+            .unwrap_or_default();
+        let response = self.send(Method::DELETE, &url, |b| b.query(&query)).await?;
+        Self::parse_json(response, &url).await
     }
 
     async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>> {
@@ -544,7 +564,8 @@ pub mod mocks {
             async fn add_script(&self, runtime: &str, script: &str, content: String) -> anyhow::Result<String>;
             async fn delete_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
             async fn get_settings_status(&self) -> anyhow::Result<SettingsStatus>;
-            async fn get_settings(&self) -> anyhow::Result<Vec<SettingsEntry>>;
+            async fn get_settings(&self, path: &str) -> anyhow::Result<Vec<SettingsEntry>>;
+            async fn delete_settings(&self, path: &str, key: Option<String>) -> anyhow::Result<SettingsDeleteResult>;
             async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
             async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()>;
             async fn settings_command(
@@ -886,6 +907,56 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn settings_are_listed_and_deleted_by_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/settings/settings/probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"path": "/settings/probe", "key": "k1", "value": "v1"}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/settings/settings/probe"))
+            .and(query_param("key", "k1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"status": "success", "keys": 1, "recursive": true}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let entries = api.get_settings("/settings/probe").await.unwrap();
+        assert_eq!(entries[0].key, "k1");
+        let removed = api
+            .delete_settings("/settings/probe", Some("k1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(removed.keys, 1);
+        assert_eq!(removed.status, "success");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_whole_path_sends_no_key_parameter() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/settings/settings/probe"))
+            .and(wiremock::matchers::query_param_is_missing("key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"status": "success", "keys": 2, "recursive": true}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let removed = api.delete_settings("/settings/probe", None).await.unwrap();
+        assert_eq!(removed.keys, 2);
     }
 
     #[tokio::test]

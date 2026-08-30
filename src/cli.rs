@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 /// Define the available output formats
 #[derive(ValueEnum, Clone, Debug)]
@@ -332,7 +332,11 @@ pub enum SettingsCommand {
     /// Summary if settings are dirty
     Status {},
     /// List settings entries
-    List {},
+    List {
+        /// Only list keys under this path (default: the whole store)
+        #[arg(long, default_value = "")]
+        path: String,
+    },
     /// Show setting descriptions
     Descriptions {
         /// Show all information (same as --output-long)
@@ -350,6 +354,21 @@ pub enum SettingsCommand {
         /// New value
         #[arg(long)]
         value: String,
+    },
+    /// Remove a setting key, or a whole section
+    // Removing a whole section is destructive, so it has to be asked for
+    // explicitly rather than by leaving --key out.
+    #[command(group = ArgGroup::new("target").required(true).args(["key", "all_keys"]))]
+    Delete {
+        /// Path of the setting (section)
+        #[arg(long)]
+        path: String,
+        /// Key to remove
+        #[arg(long)]
+        key: Option<String>,
+        /// Remove every key under the path instead of a single key
+        #[arg(long)]
+        all_keys: bool,
     },
     /// Issue settings command (load/save/reload)
     Command {
