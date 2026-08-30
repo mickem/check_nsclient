@@ -1,4 +1,5 @@
 use crate::nsclient::api::ApiClientApi;
+use crate::nsclient::messages::PingResult;
 use crate::rendering::Rendering;
 
 pub async fn handle_ping_command(
@@ -21,13 +22,7 @@ pub async fn handle_version_command(
     api: Box<dyn ApiClientApi>,
 ) -> anyhow::Result<()> {
     match api.ping().await {
-        Ok(item) => {
-            if output.is_flat() {
-                output.render_flat_single(&item.to_dict())
-            } else {
-                output.render_nested_single(&item)
-            }
-        }
+        Ok(item) => output.render_single(&item, PingResult::to_dict),
         Err(e) => anyhow::bail!("Failed to fetch version: {:#}", e),
     }
 }
@@ -37,7 +32,6 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::PingResult;
     use crate::rendering::StringRender;
     use anyhow::anyhow;
 

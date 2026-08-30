@@ -80,22 +80,14 @@ pub async fn route_profile(output: Rendering, command: &ProfileCommands) -> anyh
                 .iter()
                 .map(|profile| map_profile_to_row(profile, default_id.as_deref()))
                 .collect();
-            if output.is_flat() {
-                output.render_flat_list(&rows, &false, &["ca"])?;
-            } else {
-                output.render_nested_list(&rows)?;
-            }
+            output.render_rows(&rows, &false, &["ca"])?;
         }
         ProfileCommands::Show { id } => {
             let profile = config::get_nsclient_profile(id)?
                 .ok_or_else(|| anyhow::anyhow!("Profile with id '{id}' does not exist"))?;
             let default_id = config::get_default_nsclient_profile()?.map(|p| p.id);
             let row = map_profile_to_row(&profile, default_id.as_deref());
-            if output.is_flat() {
-                output.render_flat_single(&row_to_indexmap(&row))?;
-            } else {
-                output.render_nested_single(&row)?;
-            }
+            output.render_single(&row, row_to_indexmap)?;
         }
         ProfileCommands::SetDefault { id } => {
             config::set_default_nsclient_profile(id)?;

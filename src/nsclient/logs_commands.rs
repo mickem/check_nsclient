@@ -1,5 +1,6 @@
 use crate::cli::LogsCommand;
 use crate::nsclient::api::ApiClientApi;
+use crate::nsclient::messages::LogStatus;
 use crate::rendering::Rendering;
 
 pub async fn route_log_commands(
@@ -24,13 +25,7 @@ pub async fn route_log_commands(
             Err(e) => anyhow::bail!("Failed to fetch logs: {:#}", e),
         },
         LogsCommand::Status {} => match api.get_log_status().await {
-            Ok(status) => {
-                if output.is_flat() {
-                    output.render_flat_single(&status.to_dict())
-                } else {
-                    output.render_nested_single(&status)
-                }
-            }
+            Ok(status) => output.render_single(&status, LogStatus::to_dict),
             Err(e) => anyhow::bail!("Failed to obtain log status: {:#}", e),
         },
         LogsCommand::Reset {} => match api.reset_log_status().await {
@@ -48,7 +43,7 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::{LogRecord, LogStatus, PaginatedResponse};
+    use crate::nsclient::messages::{LogRecord, PaginatedResponse};
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;

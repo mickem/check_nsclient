@@ -17,27 +17,18 @@ pub async fn route_script_commands(
 ) -> anyhow::Result<()> {
     match command {
         ScriptsCommand::ListRuntimes {} => match api.list_script_runtimes().await {
-            Ok(runtimes) => {
-                if output.is_flat() {
-                    output.render_flat_list(&runtimes, &false, &[])
-                } else {
-                    output.render_nested_list(&runtimes)
-                }
-            }
+            Ok(runtimes) => output.render_rows(&runtimes, &false, &[]),
             Err(e) => anyhow::bail!("Failed to fetch script runtimes: {:#}", e),
         },
         ScriptsCommand::List { runtime } => match api.list_scripts(runtime).await {
-            Ok(scripts) => {
-                if output.is_flat() {
-                    let rows: Vec<ScriptRow> = scripts
-                        .into_iter()
-                        .map(|script| ScriptRow { script })
-                        .collect();
-                    output.render_flat_list(&rows, &false, &[])
-                } else {
-                    output.render_nested_list(&scripts)
-                }
-            }
+            Ok(scripts) => output.render_list(
+                &scripts,
+                |script| ScriptRow {
+                    script: script.clone(),
+                },
+                &false,
+                &[],
+            ),
             Err(e) => anyhow::bail!("Failed to fetch scripts for runtime {runtime}: {:#}", e),
         },
     }

@@ -1,5 +1,6 @@
 use crate::cli::ModulesCommand;
 use crate::nsclient::api::ApiClientApi;
+use crate::nsclient::messages::{ListModulesResult, ModulesResult};
 use crate::rendering::Rendering;
 
 pub async fn route_module_commands(
@@ -9,28 +10,16 @@ pub async fn route_module_commands(
 ) -> anyhow::Result<()> {
     match &command {
         ModulesCommand::List { all, long } => match api.list_modules(all).await {
-            Ok(modules) => {
-                if output.is_flat() {
-                    let flat_modules = modules.iter().map(|m| m.to_flat()).collect::<Vec<_>>();
-                    output.render_flat_list(
-                        &flat_modules,
-                        long,
-                        &["description", "name", "plugin_id"],
-                    )
-                } else {
-                    output.render_nested_list(&modules)
-                }
-            }
+            Ok(modules) => output.render_list(
+                &modules,
+                ListModulesResult::to_flat,
+                long,
+                &["description", "name", "plugin_id"],
+            ),
             Err(e) => anyhow::bail!("Failed to fetch modules: {:#}", e),
         },
         &ModulesCommand::Show { id } => match api.get_module(id).await {
-            Ok(module) => {
-                if output.is_flat() {
-                    output.render_flat_single(&module.to_dict())
-                } else {
-                    output.render_nested_single(&module)
-                }
-            }
+            Ok(module) => output.render_single(&module, ModulesResult::to_dict),
             Err(e) => anyhow::bail!("Failed to fetch module {id}: {:#}", e),
         },
         &ModulesCommand::Load { id } => match api.module_command(id, "load").await {
@@ -85,7 +74,7 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::{ListModulesMetadata, ListModulesResult, ModulesResult};
+    use crate::nsclient::messages::ListModulesMetadata;
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;

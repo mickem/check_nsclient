@@ -72,6 +72,62 @@ impl Rendering {
         };
     }
 
+    /// Render a list of items in the selected output format.
+    ///
+    /// Flat formats (text table, csv) render one row per item as produced by `to_row`;
+    /// nested formats (json, yaml) serialize the items themselves. `long_columns` are
+    /// hidden from the table unless `long` or the global `--output-long` is set.
+    pub fn render_list<T, R, F>(
+        &self,
+        items: &[T],
+        to_row: F,
+        long: &bool,
+        long_columns: &[&str],
+    ) -> anyhow::Result<()>
+    where
+        T: Serialize,
+        R: Tabled + Serialize,
+        F: Fn(&T) -> R,
+    {
+        if self.is_flat() {
+            let rows: Vec<R> = items.iter().map(to_row).collect();
+            self.render_flat_list(&rows, long, long_columns)
+        } else {
+            self.render_nested_list(items)
+        }
+    }
+
+    /// Render a list whose items are already table rows (see [`Rendering::render_list`]).
+    pub fn render_rows<T>(
+        &self,
+        items: &[T],
+        long: &bool,
+        long_columns: &[&str],
+    ) -> anyhow::Result<()>
+    where
+        T: Tabled + Serialize,
+    {
+        if self.is_flat() {
+            self.render_flat_list(items, long, long_columns)
+        } else {
+            self.render_nested_list(items)
+        }
+    }
+
+    /// Render a single item: a key/value table (from `to_dict`) for flat formats,
+    /// the serialized item itself for nested formats.
+    pub fn render_single<T, F>(&self, item: &T, to_dict: F) -> anyhow::Result<()>
+    where
+        T: Serialize,
+        F: Fn(&T) -> IndexMap<String, String>,
+    {
+        if self.is_flat() {
+            self.render_flat_single(&to_dict(item))
+        } else {
+            self.render_nested_single(item)
+        }
+    }
+
     pub fn render_nested_list<T: Serialize>(&self, object: &[T]) -> anyhow::Result<()> {
         match self.output {
             OutputFormat::Text => anyhow::bail!("Nested not supported in text output"),
@@ -349,6 +405,63 @@ mod tests {
         let (r, _) = rendering(OutputFormat::Json, OutputStyle::Rounded, false);
         assert!(r.render_flat_list(&rows(), &false, &[]).is_err());
         assert!(r.render_flat_single(&IndexMap::new()).is_err());
+    }
+
+    #[test]
+    fn render_list_picks_rows_for_flat_and_items_for_nested() {
+        #[derive(Serialize)]
+        struct Item {
+            id: u32,
+            nested: Vec<u32>,
+        }
+        #[derive(Tabled, Serialize)]
+        struct ItemRow {
+            id: u32,
+            count: usize,
+        }
+        let items = vec![Item {
+            id: 7,
+            nested: vec![1, 2, 3],
+        }];
+        let to_row = |item: &Item| ItemRow {
+            id: item.id,
+            count: item.nested.len(),
+        };
+
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Markdown, false);
+        r.render_list(&items, to_row, &false, &["count"]).unwrap();
+        assert_eq!(out.borrow().as_str(), "| id |\n|----|\n| 7  |\n");
+
+        let (r, out) = rendering(OutputFormat::Json, OutputStyle::Markdown, false);
+        r.render_list(&items, to_row, &false, &["count"]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out.borrow()).unwrap();
+        assert_eq!(parsed[0]["nested"][2], 3);
+    }
+
+    #[test]
+    fn render_rows_uses_items_as_rows() {
+        let (r, out) = rendering(OutputFormat::Csv, OutputStyle::Markdown, true);
+        r.render_rows(&rows(), &false, &[]).unwrap();
+        assert_eq!(
+            out.borrow().as_str(),
+            "id,name,description\n1,one,first\n\n"
+        );
+    }
+
+    #[test]
+    fn render_single_picks_dict_for_flat_and_item_for_nested() {
+        let to_dict = |row: &Row| {
+            let mut map = IndexMap::new();
+            map.insert("id".to_string(), row.id.clone());
+            map
+        };
+        let (r, out) = rendering(OutputFormat::Text, OutputStyle::Markdown, false);
+        r.render_single(&rows()[0], to_dict).unwrap();
+        assert_eq!(out.borrow().as_str(), "| id | 1 |\n");
+
+        let (r, out) = rendering(OutputFormat::Yaml, OutputStyle::Markdown, false);
+        r.render_single(&rows()[0], to_dict).unwrap();
+        assert!(out.borrow().contains("description: first"));
     }
 
     #[test]

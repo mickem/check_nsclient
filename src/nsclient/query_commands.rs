@@ -1,5 +1,6 @@
 use crate::cli::QueriesCommand;
 use crate::nsclient::api::ApiClientApi;
+use crate::nsclient::messages::{ExecuteNagiosResult, ExecuteResult, QueryResult};
 use crate::rendering::Rendering;
 
 /// Route a `queries` sub command.
@@ -14,33 +15,21 @@ pub async fn route_query_commands(
     match &command {
         QueriesCommand::List { all, long } => match api.list_queries(all).await {
             Ok(queries) => {
-                if output.is_flat() {
-                    output.render_flat_list(&queries, long, &["description"])?;
-                } else {
-                    output.render_nested_list(&queries)?;
-                }
+                output.render_rows(&queries, long, &["description"])?;
                 Ok(0)
             }
             Err(e) => anyhow::bail!("Failed to fetch queries: {:#}", e),
         },
         &QueriesCommand::Show { id } => match api.get_query(id).await {
             Ok(query) => {
-                if output.is_flat() {
-                    output.render_flat_single(&query.to_dict())?;
-                } else {
-                    output.render_nested_single(&query)?;
-                }
+                output.render_single(&query, QueryResult::to_dict)?;
                 Ok(0)
             }
             Err(e) => anyhow::bail!("Failed to fetch query {id}: {:#}", e),
         },
         &QueriesCommand::Execute { id, args } => match api.execute_query(id, args).await {
             Ok(result) => {
-                if output.is_flat() {
-                    output.render_flat_single(&result.to_dict())?;
-                } else {
-                    output.render_nested_single(&result)?;
-                }
+                output.render_single(&result, ExecuteResult::to_dict)?;
                 Ok(0)
             }
             Err(e) => anyhow::bail!("Failed to execute query {id}: {:#}", e),
@@ -52,10 +41,8 @@ pub async fn route_query_commands(
                         for line in &result.lines {
                             output.print(&line.render_nagios());
                         }
-                    } else if output.is_flat() {
-                        output.render_flat_single(&result.to_dict())?;
                     } else {
-                        output.render_nested_single(&result)?;
+                        output.render_single(&result, ExecuteNagiosResult::to_dict)?;
                     }
                     Ok(result.get_exit_code())
                 }
@@ -70,10 +57,7 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::{
-        ExecuteLine, ExecuteNagiosLine, ExecuteNagiosResult, ExecuteResult, ListQueriesResult,
-        PerfData, QueryResult,
-    };
+    use crate::nsclient::messages::{ExecuteLine, ExecuteNagiosLine, ListQueriesResult, PerfData};
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;

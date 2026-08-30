@@ -1,6 +1,8 @@
 use crate::cli::{SettingsCommand, SettingsCommandActionCli};
 use crate::nsclient::api::ApiClientApi;
-use crate::nsclient::messages::{SettingsCommandAction, SettingsEntry};
+use crate::nsclient::messages::{
+    SettingsCommandAction, SettingsDescription, SettingsEntry, SettingsStatus,
+};
 use crate::rendering::Rendering;
 
 fn map_action(action: &SettingsCommandActionCli) -> SettingsCommandAction {
@@ -18,48 +20,30 @@ pub async fn route_settings_commands(
 ) -> anyhow::Result<()> {
     match command {
         SettingsCommand::Status {} => match api.get_settings_status().await {
-            Ok(status) => {
-                if output.is_flat() {
-                    output.render_flat_single(&status.to_dict())
-                } else {
-                    output.render_nested_single(&status)
-                }
-            }
+            Ok(status) => output.render_single(&status, SettingsStatus::to_dict),
             Err(e) => anyhow::bail!("Failed to fetch settings status: {:#}", e),
         },
         SettingsCommand::List {} => match api.get_settings().await {
-            Ok(settings) => {
-                if output.is_flat() {
-                    output.render_flat_list(&settings, &false, &[])
-                } else {
-                    output.render_nested_single(&settings)
-                }
-            }
+            Ok(settings) => output.render_rows(&settings, &false, &[]),
             Err(e) => anyhow::bail!("Failed to fetch settings entries: {:#}", e),
         },
         SettingsCommand::Descriptions { long } => match api.get_settings_descriptions().await {
-            Ok(descriptions) => {
-                if output.is_flat() {
-                    let descriptions = descriptions.iter().map(|d| d.to_flat()).collect::<Vec<_>>();
-                    output.render_flat_list(
-                        &descriptions,
-                        long,
-                        &[
-                            "icon",
-                            "is_template_key",
-                            "is_advanced_key",
-                            "is_object",
-                            "is_sample_key",
-                            "sample_usage",
-                            "value",
-                            "default_value",
-                            "description",
-                        ],
-                    )
-                } else {
-                    output.render_nested_single(&descriptions)
-                }
-            }
+            Ok(descriptions) => output.render_list(
+                &descriptions,
+                SettingsDescription::to_flat,
+                long,
+                &[
+                    "icon",
+                    "is_template_key",
+                    "is_advanced_key",
+                    "is_object",
+                    "is_sample_key",
+                    "sample_usage",
+                    "value",
+                    "default_value",
+                    "description",
+                ],
+            ),
             Err(e) => anyhow::bail!("Failed to fetch settings descriptions: {:#}", e),
         },
         SettingsCommand::Set { path, key, value } => {
@@ -92,7 +76,6 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::{SettingsDescription, SettingsStatus};
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;

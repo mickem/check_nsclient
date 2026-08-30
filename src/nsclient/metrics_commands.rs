@@ -30,13 +30,7 @@ pub async fn route_metrics_commands(
 ) -> anyhow::Result<()> {
     match command {
         MetricsCommand::Show {} => match api.get_metrics().await {
-            Ok(metrics) => {
-                if output.is_flat() {
-                    output.render_flat_single(&metrics_to_dict(&metrics))
-                } else {
-                    output.render_nested_single(&metrics)
-                }
-            }
+            Ok(metrics) => output.render_single(&metrics, metrics_to_dict),
             Err(e) => anyhow::bail!("Failed to fetch metrics: {:#}", e),
         },
     }
