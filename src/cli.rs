@@ -282,8 +282,10 @@ pub enum SettingsCommandActionCli {
 
 #[derive(Subcommand)]
 pub enum MetricsCommand {
-    /// Dump Prometheus style metrics
+    /// Show all metrics as a table (or json/yaml/csv)
     Show {},
+    /// Dump metrics in the OpenMetrics/Prometheus text exposition format
+    Openmetrics {},
 }
 
 #[derive(Subcommand)]

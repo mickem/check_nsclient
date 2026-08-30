@@ -33,6 +33,15 @@ pub async fn route_metrics_commands(
             Ok(metrics) => output.render_single(&metrics, metrics_to_dict),
             Err(e) => anyhow::bail!("Failed to fetch metrics: {:#}", e),
         },
+        // The exposition format is line based and meant to be piped straight
+        // into a scraper, so it is printed verbatim in every output format.
+        MetricsCommand::Openmetrics {} => match api.get_openmetrics().await {
+            Ok(body) => {
+                output.print(&body);
+                Ok(())
+            }
+            Err(e) => anyhow::bail!("Failed to fetch openmetrics: {:#}", e),
+        },
     }
 }
 
@@ -110,6 +119,35 @@ mod tests {
         assert_eq!(parsed["system.cpu.total.user"], 12.5);
         assert_eq!(parsed["system.hostname"], "host-1");
         assert_eq!(parsed["system.ok"], true);
+    }
+
+    #[tokio::test]
+    async fn openmetrics_is_printed_verbatim() {
+        for format in [OutputFormat::Text, OutputFormat::Json] {
+            let mut api = MockApiClientApiImpl::new();
+            api.expect_get_openmetrics()
+                .returning(|| Ok("cpu_total 12\nmem_used 42\n".to_string()));
+            let (output, out) = rendering(format);
+
+            route_metrics_commands(output, Box::new(api), &MetricsCommand::Openmetrics {})
+                .await
+                .unwrap();
+
+            assert_eq!(out.borrow().as_str(), "cpu_total 12\nmem_used 42\n\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn openmetrics_error_is_reported() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_openmetrics()
+            .returning(|| Err(anyhow!("boom")));
+        let (output, _) = rendering(OutputFormat::Text);
+
+        let err = route_metrics_commands(output, Box::new(api), &MetricsCommand::Openmetrics {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Failed to fetch openmetrics: boom");
     }
 
     #[tokio::test]

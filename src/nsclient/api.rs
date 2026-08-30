@@ -82,6 +82,12 @@ impl ApiClient {
         self.send(Method::GET, path, |b| b).await.map(|_| ())
     }
 
+    /// Fetch a response body verbatim (for endpoints that are not JSON).
+    async fn get_text(&self, path: &str) -> anyhow::Result<String> {
+        let response = self.send(Method::GET, path, |b| b).await?;
+        Ok(response.text().await?)
+    }
+
     async fn get_with_query<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -269,6 +275,8 @@ pub trait ApiClientApi: Send + Sync {
     /// Revoke the API token this client authenticates with (server side).
     async fn logout(&self) -> anyhow::Result<()>;
     async fn get_metrics(&self) -> anyhow::Result<Metrics>;
+    /// Metrics in the OpenMetrics/Prometheus text exposition format.
+    async fn get_openmetrics(&self) -> anyhow::Result<String>;
 }
 
 #[async_trait::async_trait]
@@ -406,6 +414,10 @@ impl ApiClientApi for ApiClient {
     async fn get_metrics(&self) -> anyhow::Result<Metrics> {
         self.get_json("api/v2/metrics").await
     }
+
+    async fn get_openmetrics(&self) -> anyhow::Result<String> {
+        self.get_text("api/v2/openmetrics").await
+    }
 }
 
 #[cfg(test)]
@@ -456,6 +468,7 @@ pub mod mocks {
             async fn login(&self) -> anyhow::Result<LoginResponse>;
             async fn logout(&self) -> anyhow::Result<()>;
             async fn get_metrics(&self) -> anyhow::Result<Metrics>;
+            async fn get_openmetrics(&self) -> anyhow::Result<String>;
         }
     }
 }
@@ -781,6 +794,29 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn openmetrics_is_returned_verbatim() {
+        let server = MockServer::start().await;
+        // The server labels this endpoint application/json even though the body
+        // is the plain-text exposition format, so it must not be JSON decoded.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/openmetrics"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_string("cpu_total 12\nmem_used 42\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(
+            api.get_openmetrics().await.unwrap(),
+            "cpu_total 12\nmem_used 42\n"
+        );
     }
 
     #[tokio::test]

@@ -977,6 +977,49 @@ fn settings_set_and_command_round_trip() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn metrics_openmetrics_is_plain_exposition_text() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    // Same warm-up as metrics_show: the exposition body is empty until
+    // CheckSystem has collected once.
+    let mut body = String::new();
+    for _ in 0..30 {
+        let out = client.ns(&[], &["metrics", "openmetrics"]);
+        assert_success(&out, "metrics openmetrics");
+        body = stdout(&out);
+        if !body.trim().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    assert!(!body.trim().is_empty(), "openmetrics stayed empty");
+    assert!(
+        !body.trim_start().starts_with('{'),
+        "must not be json: {body}"
+    );
+    assert!(!body.contains('│'), "must not be a table: {body}");
+    let sample = body
+        .lines()
+        .find(|l| l.starts_with("system."))
+        .unwrap_or_else(|| body.lines().next().expect("at least one line"));
+    let (name, value) = sample
+        .rsplit_once(' ')
+        .unwrap_or_else(|| panic!("expected `name value`, got {sample:?}"));
+    assert!(!name.is_empty(), "{sample:?}");
+    assert!(
+        value.parse::<f64>().is_ok(),
+        "expected a numeric value in {sample:?}"
+    );
+
+    // The exposition format is printed verbatim regardless of --output.
+    let json_out = client.ns(&["--output", "json"], &["metrics", "openmetrics"]);
+    assert_success(&json_out, "metrics openmetrics --output json");
+    assert!(!stdout(&json_out).trim_start().starts_with('{'));
+}
+
+#[test]
 fn metrics_show() {
     let target = require_target!();
     let client = shared(&target);
