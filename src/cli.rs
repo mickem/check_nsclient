@@ -91,6 +91,11 @@ pub enum NSClientCommands {
         #[command(subcommand)]
         command: EventsCommand,
     },
+    /// Show the agent tags
+    Tags {
+        #[command(subcommand)]
+        command: TagsCommand,
+    },
     /// Inspect/acknowledge logs
     Logs {
         #[command(subcommand)]
@@ -230,6 +235,12 @@ pub enum AliasesCommand {
         #[arg(short, long)]
         long: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum TagsCommand {
+    /// Show all tags set on this agent
+    Show {},
 }
 
 #[derive(Subcommand)]

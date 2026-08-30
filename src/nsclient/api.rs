@@ -6,7 +6,7 @@ use crate::nsclient::messages::{
     AliasResult, EventRecord, ExecuteNagiosResult, ExecuteResult, ListModulesResult,
     ListQueriesResult, LogRecord, LogStatus, LoginResponse, Metrics, ModulesResult,
     PaginatedResponse, PingResult, QueryResult, ScriptRuntimes, SettingsCommandAction,
-    SettingsCommandRequest, SettingsDescription, SettingsEntry, SettingsStatus,
+    SettingsCommandRequest, SettingsDescription, SettingsEntry, SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -278,6 +278,7 @@ pub trait ApiClientApi: Send + Sync {
     async fn list_events(&self) -> anyhow::Result<Vec<EventRecord>>;
     /// Drain the event store: the returned events are removed from the server.
     async fn clear_events(&self) -> anyhow::Result<Vec<EventRecord>>;
+    async fn get_tags(&self) -> anyhow::Result<Tags>;
     async fn get_metrics(&self) -> anyhow::Result<Metrics>;
     /// Metrics in the OpenMetrics/Prometheus text exposition format.
     async fn get_openmetrics(&self) -> anyhow::Result<String>;
@@ -430,6 +431,10 @@ impl ApiClientApi for ApiClient {
         Self::parse_json(response, path).await
     }
 
+    async fn get_tags(&self) -> anyhow::Result<Tags> {
+        self.get_json("api/v2/tags").await
+    }
+
     async fn get_metrics(&self) -> anyhow::Result<Metrics> {
         self.get_json("api/v2/metrics").await
     }
@@ -489,6 +494,7 @@ pub mod mocks {
             async fn logout(&self) -> anyhow::Result<()>;
             async fn list_events(&self) -> anyhow::Result<Vec<EventRecord>>;
             async fn clear_events(&self) -> anyhow::Result<Vec<EventRecord>>;
+            async fn get_tags(&self) -> anyhow::Result<Tags>;
             async fn get_metrics(&self) -> anyhow::Result<Metrics>;
             async fn get_openmetrics(&self) -> anyhow::Result<String>;
         }
@@ -816,6 +822,22 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn tags_are_returned_as_a_map() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/tags"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"env": "prod"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(api.get_tags().await.unwrap()["env"], "prod");
     }
 
     #[tokio::test]

@@ -65,6 +65,9 @@ pub struct ScriptRuntimes {
 
 pub type Metrics = HashMap<String, Value>;
 
+/// Agent tags: free-form `name -> value` labels attached to this host.
+pub type Tags = HashMap<String, String>;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PaginatedResponse<T> {
     pub content: T,

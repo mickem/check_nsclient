@@ -825,6 +825,33 @@ fn aliases_list() {
 }
 
 // ---------------------------------------------------------------------------
+// tags
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tags_show() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    // A stock agent has no tags configured, so json must still be a (possibly
+    // empty) object while the table says so in words.
+    let tags = client.json(&["tags", "show"]);
+    let map = tags.as_object().expect("a tag object");
+    for (name, value) in map {
+        assert!(value.is_string(), "tag {name} is not a string: {value}");
+    }
+
+    let text = client.text(&["tags", "show"]);
+    if map.is_empty() {
+        assert_eq!(text, "No tags set\n");
+    } else {
+        let (name, value) = map.iter().next().unwrap();
+        assert!(text.contains(name.as_str()), "{text}");
+        assert!(text.contains(value.as_str().unwrap()), "{text}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // events
 // ---------------------------------------------------------------------------
 

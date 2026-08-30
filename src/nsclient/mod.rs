@@ -12,6 +12,7 @@ mod module_commands;
 mod query_commands;
 mod scripts_commands;
 mod settings_commands;
+mod tag_commands;
 
 use crate::cli::{NSClientCommandOptions, NSClientCommands};
 use crate::config;
@@ -26,6 +27,7 @@ use crate::nsclient::module_commands::route_module_commands;
 use crate::nsclient::query_commands::route_query_commands;
 use crate::nsclient::scripts_commands::route_script_commands;
 use crate::nsclient::settings_commands::route_settings_commands;
+use crate::nsclient::tag_commands::route_tag_commands;
 use crate::rendering::Rendering;
 use reqwest::Certificate;
 use std::time::Duration;
@@ -136,6 +138,9 @@ pub async fn route_ns_client(
         }
         NSClientCommands::Events { command } => {
             route_event_commands(output, build_client_from_profile(args)?, command).await?
+        }
+        NSClientCommands::Tags { command } => {
+            route_tag_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Logs { command } => {
             route_log_commands(output, build_client_from_profile(args)?, command).await?
