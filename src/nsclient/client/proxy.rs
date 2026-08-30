@@ -3,6 +3,7 @@ use crate::nsclient::client::command_input::{CommandType, ModuleCommand, QueryCo
 use crate::nsclient::client::events::{UICommand, UIEvent, send_or_error};
 use crate::nsclient::client::log_widget::{LogLevel, LogRecord};
 use crate::nsclient::messages::Metrics;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
@@ -73,13 +74,7 @@ impl BackendProxy {
             Ok((response, next_last_index)) => {
                 for entry in response.content.iter() {
                     let message = format!("[{}] {}", entry.level, entry.message);
-                    let level = match entry.level.as_str() {
-                        "debug" => LogLevel::Debug,
-                        "info" => LogLevel::Info,
-                        "error" => LogLevel::Error,
-                        "warning" => LogLevel::Warning,
-                        _ => LogLevel::Error,
-                    };
+                    let level = LogLevel::parse(&entry.level);
                     self.send_or_error(UIEvent::Log(LogRecord { level, message }))
                         .await;
                 }
@@ -250,15 +245,7 @@ impl BackendProxy {
                 return;
             }
         };
-        let cpu_user = get_float(&metrics, "system.cpu.total.user");
-        let cpu_kernel = get_float(&metrics, "system.cpu.total.kernel");
-        let memory_used = get_float(&metrics, "system.mem.physical.used");
-        let memory_total = get_float(&metrics, "system.mem.physical.total");
-        let memory = if memory_total != 0.0f64 {
-            memory_used / memory_total
-        } else {
-            0.0
-        };
+        let (cpu_user, cpu_kernel, memory) = performance_from_metrics(&metrics);
         self.send_or_error(UIEvent::Performance(cpu_user, cpu_kernel, memory))
             .await;
     }
@@ -271,9 +258,71 @@ impl BackendProxy {
     }
 }
 
+/// Extract (cpu user %, cpu kernel %, memory used ratio 0..1) from the metrics map.
+fn performance_from_metrics(metrics: &Metrics) -> (f64, f64, f64) {
+    let cpu_user = get_float(metrics, "system.cpu.total.user");
+    let cpu_kernel = get_float(metrics, "system.cpu.total.kernel");
+    let memory_used = get_float(metrics, "system.mem.physical.used");
+    let memory_total = get_float(metrics, "system.mem.physical.total");
+    let memory = if memory_total > 0.0 {
+        memory_used / memory_total
+    } else {
+        0.0
+    };
+    (cpu_user, cpu_kernel, memory)
+}
+
 fn get_float(metrics: &Metrics, key: &str) -> f64 {
     metrics
         .get(key)
         .and_then(|value| value.as_f64())
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn get_float_handles_missing_and_non_numeric_values() {
+        let metrics: Metrics = HashMap::from([
+            ("num".to_string(), json!(12.5)),
+            ("int".to_string(), json!(7)),
+            ("str".to_string(), json!("12")),
+            ("null".to_string(), json!(null)),
+        ]);
+        assert_eq!(get_float(&metrics, "num"), 12.5);
+        assert_eq!(get_float(&metrics, "int"), 7.0);
+        assert_eq!(get_float(&metrics, "str"), 0.0);
+        assert_eq!(get_float(&metrics, "null"), 0.0);
+        assert_eq!(get_float(&metrics, "missing"), 0.0);
+    }
+
+    #[test]
+    fn performance_computes_memory_ratio() {
+        let metrics: Metrics = HashMap::from([
+            ("system.cpu.total.user".to_string(), json!(12.0)),
+            ("system.cpu.total.kernel".to_string(), json!(3.0)),
+            ("system.mem.physical.used".to_string(), json!(4096)),
+            ("system.mem.physical.total".to_string(), json!(16384)),
+        ]);
+        assert_eq!(performance_from_metrics(&metrics), (12.0, 3.0, 0.25));
+    }
+
+    #[test]
+    fn performance_avoids_division_by_zero() {
+        let metrics: Metrics = HashMap::from([
+            ("system.mem.physical.used".to_string(), json!(4096)),
+            ("system.mem.physical.total".to_string(), json!(0)),
+        ]);
+        assert_eq!(performance_from_metrics(&metrics), (0.0, 0.0, 0.0));
+        assert_eq!(performance_from_metrics(&HashMap::new()), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn bool_to_check_renders_markers() {
+        assert_eq!(bool_to_check(true), "✓");
+        assert_eq!(bool_to_check(false), "☐");
+    }
 }
