@@ -77,7 +77,9 @@ pub struct CommandInput<'a> {
     available_commands: Vec<String>,
     history: Vec<String>,
     history_index: Option<usize>,
-    has_changed: bool,
+    /// The text that was being typed before the user started browsing history with Up/Down;
+    /// restored when browsing past the most recent entry.
+    draft: Option<String>,
 }
 
 impl<'a> CommandInput<'a> {
@@ -87,7 +89,7 @@ impl<'a> CommandInput<'a> {
             available_commands: Vec::new(),
             history,
             history_index: None,
-            has_changed: false,
+            draft: None,
         }
     }
 
@@ -120,21 +122,25 @@ impl<'a> CommandInput<'a> {
         }
     }
 
+    /// Parse the current input into a command.
+    ///
+    /// Only commands that parse successfully are recorded in the history and clear the input;
+    /// an invalid command is left in place so the user can correct it.
     pub fn get_command(&mut self) -> anyhow::Result<Command> {
         let value = self.command_state.value().to_owned();
-        self.add_history(&value);
-
         self.history_index = None;
-        self.has_changed = false;
+        self.draft = None;
 
         let tokens = tokenize_command(&value)?;
         if tokens.is_empty() || !is_valid_command(&tokens[0], &self.available_commands) {
             anyhow::bail!("Invalid command")
         }
+        let command = parse_command(&tokens)?;
 
+        self.add_history(&value);
         self.command_state.truncate();
-        *self.command_state.status_mut() = tui_prompts::Status::Pending;
-        parse_command(&tokens)
+        self.set_status_pending();
+        Ok(command)
     }
 
     fn set_status_ok(&mut self) {
@@ -147,46 +153,39 @@ impl<'a> CommandInput<'a> {
         *self.command_state.status_mut() = tui_prompts::Status::Pending;
     }
 
-    fn push_history_if_changed(&mut self) {
-        if self.has_changed {
-            let value = self.command_state.value().to_owned();
-            self.add_history(&value);
-            self.has_changed = false;
-        }
-    }
     fn history_up(&mut self) {
         if self.history.is_empty() {
             return;
         }
-        self.push_history_if_changed();
         let new_index = match self.history_index {
-            None => self.history.len() - 1,
-            Some(i) => {
-                if i > 0 {
-                    i - 1
-                } else {
-                    0
-                }
+            None => {
+                self.draft = Some(self.command_state.value().to_owned());
+                self.history.len() - 1
             }
+            Some(i) => i.saturating_sub(1),
         };
         self.history_index = Some(new_index);
         self.update_input_from_history();
     }
 
     fn history_down(&mut self) {
-        if self.history.is_empty() {
+        let Some(i) = self.history_index else {
             return;
+        };
+        if i + 1 < self.history.len() {
+            self.history_index = Some(i + 1);
+            self.update_input_from_history();
+        } else {
+            self.history_index = None;
+            let draft = self.draft.take().unwrap_or_default();
+            self.set_input(&draft);
         }
-        self.push_history_if_changed();
-        if let Some(i) = self.history_index {
-            if i < self.history.len() - 1 {
-                self.history_index = Some(i + 1);
-                self.update_input_from_history();
-            } else {
-                self.history_index = None;
-                self.command_state.truncate();
-            }
-        }
+    }
+
+    fn set_input(&mut self, text: &str) {
+        self.command_state.truncate();
+        self.command_state.value_mut().push_str(text);
+        self.command_state.move_end();
     }
 
     pub(crate) fn handle_history(&mut self, command: HistoryCommand) -> Vec<String> {
@@ -216,11 +215,9 @@ impl<'a> CommandInput<'a> {
 
     fn update_input_from_history(&mut self) {
         if let Some(idx) = self.history_index
-            && let Some(cmd) = self.history.get(idx)
+            && let Some(cmd) = self.history.get(idx).cloned()
         {
-            self.command_state.truncate();
-            self.command_state.value_mut().push_str(cmd);
-            self.command_state.move_end();
+            self.set_input(&cmd);
         }
     }
 
@@ -256,15 +253,12 @@ impl<'a> CommandInput<'a> {
             }
             (KeyCode::Backspace, _) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
                 self.command_state.backspace();
-                self.has_changed = true;
             }
             (KeyCode::Delete, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                 self.command_state.delete();
-                self.has_changed = true;
             }
             (KeyCode::Char(c), _) => {
                 self.command_state.push(c);
-                self.has_changed = true;
             }
             _ => {
                 return;
@@ -618,6 +612,106 @@ mod tests {
         assert!(parse_command(&tokens("history delete")).is_err());
         assert!(parse_command(&tokens("history delete x")).is_err());
         assert!(parse_command(&tokens("history bogus")).is_err());
+    }
+
+    fn type_text(input: &mut CommandInput, text: &str) {
+        for c in text.chars() {
+            input.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    fn press(input: &mut CommandInput, code: KeyCode) {
+        input.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn value(input: &mut CommandInput) -> String {
+        input.get_state().value().to_string()
+    }
+
+    #[test]
+    fn valid_command_is_recorded_in_history_and_clears_input() {
+        let mut input = CommandInput::new(vec![]);
+        type_text(&mut input, "ping");
+        assert!(input.has_value());
+        assert!(input.get_command().is_ok());
+        assert_eq!(input.get_history(), vec!["ping".to_string()]);
+        assert!(!input.has_value());
+    }
+
+    #[test]
+    fn invalid_command_is_not_recorded_and_keeps_input() {
+        let mut input = CommandInput::new(vec![]);
+        type_text(&mut input, "bogus");
+        assert!(input.get_command().is_err());
+        assert!(input.get_history().is_empty());
+        assert_eq!(value(&mut input), "bogus");
+
+        type_text(&mut input, " \"unterminated");
+        assert!(input.get_command().is_err());
+        assert!(input.get_history().is_empty());
+    }
+
+    #[test]
+    fn history_is_deduplicated_and_capped() {
+        let mut input = CommandInput::new(vec![]);
+        for i in 0..(MAX_HISTORY_LENGTH + 5) {
+            input.add_history(&format!("cmd{i}"));
+        }
+        assert_eq!(input.history.len(), MAX_HISTORY_LENGTH);
+        assert_eq!(input.history[0], "cmd5");
+
+        input.add_history("cmd7");
+        assert_eq!(input.history.len(), MAX_HISTORY_LENGTH);
+        assert_eq!(input.history.last().unwrap(), "cmd7");
+        assert_eq!(input.history.iter().filter(|c| *c == "cmd7").count(), 1);
+
+        input.add_history("   ");
+        assert_eq!(input.history.len(), MAX_HISTORY_LENGTH);
+    }
+
+    #[test]
+    fn history_navigation_restores_draft_and_does_not_record_it() {
+        let mut input = CommandInput::new(vec!["first".into(), "second".into()]);
+        type_text(&mut input, "dra");
+
+        press(&mut input, KeyCode::Up);
+        assert_eq!(value(&mut input), "second");
+        press(&mut input, KeyCode::Up);
+        assert_eq!(value(&mut input), "first");
+        // Going past the oldest entry stays on the oldest entry.
+        press(&mut input, KeyCode::Up);
+        assert_eq!(value(&mut input), "first");
+
+        press(&mut input, KeyCode::Down);
+        assert_eq!(value(&mut input), "second");
+        press(&mut input, KeyCode::Down);
+        assert_eq!(value(&mut input), "dra");
+        // Down with nothing selected is a no-op.
+        press(&mut input, KeyCode::Down);
+        assert_eq!(value(&mut input), "dra");
+
+        assert_eq!(
+            input.get_history(),
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn history_navigation_with_empty_history_is_a_noop() {
+        let mut input = CommandInput::new(vec![]);
+        type_text(&mut input, "abc");
+        press(&mut input, KeyCode::Up);
+        press(&mut input, KeyCode::Down);
+        assert_eq!(value(&mut input), "abc");
+    }
+
+    #[test]
+    fn release_key_events_are_ignored() {
+        let mut input = CommandInput::new(vec![]);
+        let mut event = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+        event.kind = KeyEventKind::Release;
+        input.handle_key_event(event);
+        assert!(!input.has_value());
     }
 
     #[test]
