@@ -18,6 +18,15 @@ struct CounterRow {
 }
 
 fn counter_to_row(counter: &Value) -> CounterRow {
+    // NSClient++ 0.18.0 answers with a flat array of counter paths, while the
+    // API documentation describes objects with `name` and `type`. Accept both
+    // so the table is useful either way.
+    if let Value::String(name) = counter {
+        return CounterRow {
+            name: name.clone(),
+            counter_type: String::new(),
+        };
+    }
     let field = |key: &str| match &counter[key] {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
@@ -114,6 +123,22 @@ mod tests {
         assert!(rendered.contains("Available Bytes"), "{rendered}");
         // A counter without a type renders an empty cell rather than "null".
         assert!(!rendered.contains("null"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn counters_accept_a_flat_list_of_names() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_metadata_counters()
+            .returning(|| Ok(vec![json!("\\Memory\\Available Bytes")]));
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_metadata_commands(output, Box::new(api), &MetadataCommand::Counters {})
+            .await
+            .unwrap();
+
+        let rendered = out.borrow();
+        assert!(rendered.contains("Available Bytes"), "{rendered}");
+        assert!(!rendered.contains('"'), "not json quoted: {rendered}");
     }
 
     #[tokio::test]

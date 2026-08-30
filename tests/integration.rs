@@ -923,13 +923,30 @@ fn metadata_list_channels_and_counters() {
         "metadata channels (text)",
     );
 
-    // Performance counters come from CheckSystem's pdh command, which only
-    // exists on Windows; on Linux 0.18.0 answers 500 rather than an empty list.
-    let out = client.ns(&["--output", "json"], &["metadata", "counters"]);
+    // Performance counters come from CheckSystem's pdh command. On Windows
+    // enumerating every counter can take minutes, so this call gets a generous
+    // timeout; on Linux 0.18.0 answers 500 rather than the documented empty
+    // list. Both outcomes are accepted — what is pinned is that a success
+    // parses and a failure is reported with context.
+    let out = client.run(&[
+        "--output",
+        "json",
+        "nsclient",
+        "--profile",
+        &client.profile,
+        "--timeout-s",
+        "300",
+        "metadata",
+        "counters",
+    ]);
     if out.status.success() {
         let counters: Value = serde_json::from_str(&stdout(&out)).expect("counters json");
         for counter in counters.as_array().expect("an array of counters") {
-            assert!(counter["name"].is_string(), "{counter}");
+            // 0.18.0 returns plain counter paths; the docs describe objects.
+            assert!(
+                counter.is_string() || counter["name"].is_string(),
+                "{counter}"
+            );
         }
     } else {
         let err = stderr(&out);
@@ -937,7 +954,10 @@ fn metadata_list_channels_and_counters() {
             err.contains("Failed to fetch performance counters"),
             "{err}"
         );
-        assert!(err.contains("CheckSystem"), "{err}");
+        assert!(
+            err.contains("CheckSystem") || err.contains("timed out"),
+            "{err}"
+        );
     }
 }
 
