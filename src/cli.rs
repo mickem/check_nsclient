@@ -326,6 +326,9 @@ pub enum ScriptsCommand {
     List {
         #[arg(long)]
         runtime: String,
+        /// List every script file, not just the ones wired up as a command
+        #[arg(short, long)]
+        all: bool,
     },
     /// Show a script definition (or the script itself)
     Show {

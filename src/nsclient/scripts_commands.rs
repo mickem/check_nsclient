@@ -20,7 +20,7 @@ pub async fn route_script_commands(
             Ok(runtimes) => output.render_rows(&runtimes, &false, &[]),
             Err(e) => anyhow::bail!("Failed to fetch script runtimes: {:#}", e),
         },
-        ScriptsCommand::List { runtime } => match api.list_scripts(runtime).await {
+        ScriptsCommand::List { runtime, all } => match api.list_scripts(runtime, all).await {
             Ok(scripts) => output.render_list(
                 &scripts,
                 |script| ScriptRow {
@@ -135,8 +135,8 @@ mod tests {
     async fn list_scripts_text() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_list_scripts()
-            .withf(|runtime| runtime == "python")
-            .returning(|_| Ok(vec!["check_a.py".into(), "check_b.py".into()]));
+            .withf(|runtime, all| runtime == "python" && !*all)
+            .returning(|_, _| Ok(vec!["check_a.py".into(), "check_b.py".into()]));
         let (output, out) = rendering(OutputFormat::Text);
 
         route_script_commands(
@@ -144,6 +144,7 @@ mod tests {
             Box::new(api),
             &ScriptsCommand::List {
                 runtime: "python".into(),
+                all: false,
             },
         )
         .await
@@ -162,7 +163,7 @@ mod tests {
     async fn list_scripts_yaml() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_list_scripts()
-            .returning(|_| Ok(vec!["check_a.py".into()]));
+            .returning(|_, _| Ok(vec!["check_a.py".into()]));
         let (output, out) = rendering(OutputFormat::Yaml);
 
         route_script_commands(
@@ -170,12 +171,40 @@ mod tests {
             Box::new(api),
             &ScriptsCommand::List {
                 runtime: "python".into(),
+                all: false,
             },
         )
         .await
         .unwrap();
 
         assert_eq!(out.borrow().as_str(), "- check_a.py\n\n");
+    }
+
+    #[tokio::test]
+    async fn list_passes_the_all_flag() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_list_scripts()
+            .withf(|runtime, all| runtime == "ext" && *all)
+            .times(1)
+            .returning(|_, _| Ok(vec!["scripts/check_ok.bat".into()]));
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_script_commands(
+            output,
+            Box::new(api),
+            &ScriptsCommand::List {
+                runtime: "ext".into(),
+                all: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            out.borrow().contains("scripts/check_ok.bat"),
+            "{}",
+            out.borrow()
+        );
     }
 
     #[tokio::test]

@@ -284,7 +284,9 @@ pub trait ApiClientApi: Send + Sync {
         args: &[(String, String)],
     ) -> anyhow::Result<ExecuteNagiosResult>;
     async fn list_script_runtimes(&self) -> anyhow::Result<Vec<ScriptRuntimes>>;
-    async fn list_scripts(&self, runtime: &str) -> anyhow::Result<Vec<String>>;
+    /// The scripts of `runtime`; `all` also lists files that are not wired up
+    /// as a command yet.
+    async fn list_scripts(&self, runtime: &str, all: &bool) -> anyhow::Result<Vec<String>>;
     /// The definition (or content) of a single script.
     async fn get_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
     /// Upload `content` as `script`, replacing an existing definition.
@@ -445,8 +447,10 @@ impl ApiClientApi for ApiClient {
     async fn list_script_runtimes(&self) -> anyhow::Result<Vec<ScriptRuntimes>> {
         self.get_json("api/v2/scripts").await
     }
-    async fn list_scripts(&self, runtime: &str) -> anyhow::Result<Vec<String>> {
-        self.get_json(&format!("api/v2/scripts/{runtime}")).await
+    async fn list_scripts(&self, runtime: &str, all: &bool) -> anyhow::Result<Vec<String>> {
+        let params = [("all".to_string(), all.to_string())];
+        self.get_with_query(&format!("api/v2/scripts/{runtime}"), &params)
+            .await
     }
 
     async fn get_script(&self, runtime: &str, script: &str) -> anyhow::Result<String> {
@@ -600,7 +604,7 @@ pub mod mocks {
                 args: &[(String, String)],
             ) -> anyhow::Result<ExecuteNagiosResult>;
             async fn list_script_runtimes(&self) -> anyhow::Result<Vec<ScriptRuntimes>>;
-            async fn list_scripts(&self, runtime: &str) -> anyhow::Result<Vec<String>>;
+            async fn list_scripts(&self, runtime: &str, all: &bool) -> anyhow::Result<Vec<String>>;
             async fn get_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
             async fn add_script(&self, runtime: &str, script: &str, content: String) -> anyhow::Result<String>;
             async fn delete_script(&self, runtime: &str, script: &str) -> anyhow::Result<String>;
@@ -1115,6 +1119,27 @@ mod tests {
         let api = token_client(&server.uri(), "secret", None);
         let removed = api.delete_settings("/settings/probe", None).await.unwrap();
         assert_eq!(removed.keys, 2);
+    }
+
+    #[tokio::test]
+    async fn list_scripts_passes_the_all_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/scripts/ext"))
+            .and(query_param("all", "true"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!(["scripts/check_ok.bat"])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(
+            api.list_scripts("ext", &true).await.unwrap(),
+            vec!["scripts/check_ok.bat".to_string()]
+        );
     }
 
     #[tokio::test]

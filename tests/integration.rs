@@ -1068,6 +1068,10 @@ fn logs_add_then_clear() {
     let target = require_target!();
     let client = Client::login(&target);
 
+    // The agent logs continuously, so start from an empty buffer: otherwise the
+    // record can land on a later page than the one we look at.
+    assert_success(&client.ns(&[], &["logs", "clear"]), "logs clear (setup)");
+
     let marker = format!("it-log-{}", std::process::id());
     let out = client.ns(
         &[],
@@ -1146,6 +1150,10 @@ fn scripts_runtimes_and_scripts() {
 
     let scripts = client.json(&["scripts", "list", "--runtime", "ext"]);
     assert!(scripts.is_array(), "{scripts}");
+    // --all also lists script files on disk that are not wired up as a command.
+    let all = client.json(&["scripts", "list", "--runtime", "ext", "--all"]);
+    assert!(all.is_array(), "{all}");
+
     let text = client.text(&["scripts", "list", "--runtime", "ext"]);
     assert!(
         text.trim().is_empty() || text.contains("│ script "),
