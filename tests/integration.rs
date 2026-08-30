@@ -20,8 +20,8 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_check_nsclient");
@@ -42,11 +42,40 @@ fn target() -> Option<Target> {
     })
 }
 
-/// Skip the calling test (returning early) unless an NSClient++ target is configured.
+/// The tests share one NSClient++ instance and several of them mutate it
+/// (loading modules, writing settings, resetting log counters). `settings
+/// command load` in particular re-reads the on-disk configuration and would
+/// undo another test's `modules enable` mid-flight, so tests take turns.
+static SERVER: Mutex<()> = Mutex::new(());
+
+fn lock_server() -> MutexGuard<'static, ()> {
+    // A panicking test poisons the mutex; the next test should still run
+    // (and report its own result) rather than fail on the poison.
+    SERVER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// An NSClient++ target plus exclusive access to it for the duration of a test.
+struct Session {
+    target: Target,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for Session {
+    type Target = Target;
+    fn deref(&self) -> &Target {
+        &self.target
+    }
+}
+
+/// Skip the calling test (returning early) unless an NSClient++ target is
+/// configured; otherwise wait for exclusive access to it.
 macro_rules! require_target {
     () => {
         match target() {
-            Some(t) => t,
+            Some(t) => Session {
+                target: t,
+                _lock: lock_server(),
+            },
             None => {
                 eprintln!(
                     "skipped: CHECK_NSCLIENT_IT_URL is not set (see tests/integration/README.md)"
@@ -200,6 +229,38 @@ fn assert_failure(out: &Output, what: &str) -> String {
         stdout(out)
     );
     stderr(out)
+}
+
+/// The API token `check_nsclient` stored for `profile` in the OS keyring.
+///
+/// Reads the very entry the binary wrote (service `check_nsclient`, key
+/// `<profile>_token`), which is what lets the logout test prove the token is
+/// revoked server side rather than merely forgotten locally.
+fn stored_token(profile: &str) -> String {
+    keyring::Entry::new("check_nsclient", &format!("{profile}_token"))
+        .expect("keyring entry")
+        .get_password()
+        .expect("a token was stored for the profile")
+}
+
+/// Status code of `GET <url>/api/v2/info` when authenticated with `token`.
+fn info_status_with_token(url: &str, token: &str) -> u16 {
+    let url = format!("{}/api/v2/info", url.trim_end_matches('/'));
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("http client")
+                .get(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .send()
+                .await
+                .expect("request")
+                .status()
+                .as_u16()
+        })
 }
 
 fn names(list: &Value, key: &str) -> Vec<String> {
