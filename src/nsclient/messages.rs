@@ -188,6 +188,9 @@ pub struct SettingsCommandRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginResponse {
     pub key: String,
+    /// The user the credentials belong to. Older servers omit it.
+    #[serde(default)]
+    pub user: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Tabled)]

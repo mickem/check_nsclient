@@ -312,6 +312,8 @@ pub enum AuthCommand {
     },
     /// Logout and forget stored token
     Logout { id: String },
+    /// Show who the stored credentials authenticate as
+    Status {},
     /// Refresh the api key (using the stored password)
     Refresh {
         /// Profile ID of profile to refresh token

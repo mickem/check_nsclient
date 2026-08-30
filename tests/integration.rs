@@ -371,6 +371,33 @@ fn logout_removes_profile_and_credentials() {
 }
 
 #[test]
+fn auth_status_reports_the_authenticated_user() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let json = client.json(&["auth", "status"]);
+    assert_eq!(json["profile"], client.profile);
+    assert_eq!(json["url"], target.url);
+    assert_eq!(json["username"], target.username);
+    assert_eq!(json["user"], target.username);
+    assert_eq!(json["authenticated"], true);
+
+    let text = client.text(&["auth", "status"]);
+    assert!(text.contains("│ user"), "{text}");
+    assert!(text.contains(&target.username), "{text}");
+}
+
+#[test]
+fn auth_status_fails_without_a_usable_profile() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let out = client.run(&["nsclient", "--profile", "no-such-profile", "auth", "status"]);
+    let err = assert_failure(&out, "auth status for an unknown profile");
+    assert!(err.contains("not found"), "{err}");
+}
+
+#[test]
 fn logout_revokes_the_token_on_the_server() {
     let target = require_target!();
     let client = Client::login(&target);

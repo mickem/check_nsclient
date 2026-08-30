@@ -51,19 +51,24 @@ fn preprocess_url(url: &str) -> String {
 pub fn build_client_from_profile(
     args: &NSClientCommandOptions,
 ) -> anyhow::Result<Box<dyn ApiClientApi>> {
-    let profile = match args.profile.as_ref() {
+    let profile = resolve_profile(args.profile.as_deref())?;
+    build_client_for_profile(&profile, &ConnectionOptions::from_args(args))
+}
+
+/// Look up `id`, or the default profile when no id is given.
+pub fn resolve_profile(id: Option<&str>) -> anyhow::Result<config::NSClientProfile> {
+    match id {
         Some(profile_id) => match config::get_nsclient_profile(profile_id)? {
-            Some(profile) => profile,
+            Some(profile) => Ok(profile),
             None => anyhow::bail!("NSClient++ profile '{}' not found.", profile_id),
         },
         None => match config::get_default_nsclient_profile()? {
-            Some(profile) => profile,
+            Some(profile) => Ok(profile),
             None => anyhow::bail!(
                 "No default NSClient++ profile set. Please specify a profile using --profile or set a default profile."
             ),
         },
-    };
-    build_client_for_profile(&profile, &ConnectionOptions::from_args(args))
+    }
 }
 
 /// Build a client that authenticates with the stored API key of `profile`.
@@ -134,9 +139,7 @@ pub async fn route_ns_client(
         NSClientCommands::Metrics { command } => {
             route_metrics_commands(output, build_client_from_profile(args)?, command).await?
         }
-        NSClientCommands::Auth { command } => {
-            route_auth_commands(output, &ConnectionOptions::from_args(args), command).await?
-        }
+        NSClientCommands::Auth { command } => route_auth_commands(output, args, command).await?,
         NSClientCommands::Client {} | NSClientCommands::Test {} => {
             client::run_client(build_client_from_profile(args)?).await?
         }
