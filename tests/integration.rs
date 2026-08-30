@@ -825,6 +825,61 @@ fn aliases_list() {
 }
 
 // ---------------------------------------------------------------------------
+// metadata
+// ---------------------------------------------------------------------------
+
+#[test]
+fn metadata_list_channels_and_counters() {
+    let target = require_target!();
+    let client = shared(&target);
+
+    let resources = client.json(&["metadata", "list"]);
+    let names = names(&resources, "name");
+    for expected in ["counters", "channels"] {
+        assert!(names.contains(&expected.to_string()), "{names:?}");
+    }
+    for resource in resources.as_array().unwrap() {
+        assert!(resource["title"].is_string(), "{resource}");
+        assert!(
+            resource["url"].as_str().unwrap().contains("/metadata/"),
+            "{resource}"
+        );
+    }
+    let text = client.text(&["metadata", "list"]);
+    assert!(text.contains("│ name "), "{text}");
+    assert!(text.contains("counters"), "{text}");
+
+    // Channels are registered by submission modules; a stock agent has none,
+    // so only the shape is pinned here.
+    let channels = client.json(&["metadata", "channels"]);
+    for channel in channels.as_array().expect("an array of channels") {
+        assert!(channel["name"].is_string(), "{channel}");
+        assert!(channel["plugins"].is_array(), "{channel}");
+    }
+    assert_success(
+        &client.ns(&[], &["metadata", "channels"]),
+        "metadata channels (text)",
+    );
+
+    // Performance counters come from CheckSystem's pdh command, which only
+    // exists on Windows; on Linux 0.18.0 answers 500 rather than an empty list.
+    let out = client.ns(&["--output", "json"], &["metadata", "counters"]);
+    if out.status.success() {
+        let counters: Value = serde_json::from_str(&stdout(&out)).expect("counters json");
+        for counter in counters.as_array().expect("an array of counters") {
+            assert!(counter["name"].is_string(), "{counter}");
+        }
+    } else {
+        let err = stderr(&out);
+        assert!(
+            err.contains("Failed to fetch performance counters"),
+            "{err}"
+        );
+        assert!(err.contains("CheckSystem"), "{err}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // tags
 // ---------------------------------------------------------------------------
 

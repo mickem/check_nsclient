@@ -292,6 +292,42 @@ pub struct ListQueriesResult {
     pub plugin: String,
 }
 
+/// One metadata resource advertised by `/api/v2/metadata`.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct MetadataResource {
+    #[tabled()]
+    pub name: String,
+    #[tabled()]
+    pub title: String,
+    #[tabled()]
+    pub url: String,
+}
+
+/// A submission channel and the modules listening on it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetadataChannel {
+    pub name: String,
+    #[serde(default)]
+    pub plugins: Vec<String>,
+}
+
+impl MetadataChannel {
+    pub fn to_flat(&self) -> FlatMetadataChannel {
+        FlatMetadataChannel {
+            name: self.name.clone(),
+            plugins: self.plugins.join(", "),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct FlatMetadataChannel {
+    #[tabled()]
+    pub name: String,
+    #[tabled()]
+    pub plugins: String,
+}
+
 /// One entry from the event store (event log hits, real-time filter matches, ...).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EventRecord {

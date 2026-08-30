@@ -96,6 +96,11 @@ pub enum NSClientCommands {
         #[command(subcommand)]
         command: TagsCommand,
     },
+    /// Discover what this agent can check and submit to
+    Metadata {
+        #[command(subcommand)]
+        command: MetadataCommand,
+    },
     /// Inspect/acknowledge logs
     Logs {
         #[command(subcommand)]
@@ -235,6 +240,16 @@ pub enum AliasesCommand {
         #[arg(short, long)]
         long: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum MetadataCommand {
+    /// List the available metadata resources
+    List {},
+    /// List the performance counters this host exposes (Windows)
+    Counters {},
+    /// List the registered submission channels and their modules
+    Channels {},
 }
 
 #[derive(Subcommand)]

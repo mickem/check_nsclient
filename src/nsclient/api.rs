@@ -4,9 +4,10 @@ use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
     AliasResult, EventRecord, ExecuteNagiosResult, ExecuteResult, ListModulesResult,
-    ListQueriesResult, LogRecord, LogStatus, LoginResponse, Metrics, ModulesResult,
-    PaginatedResponse, PingResult, QueryResult, ScriptRuntimes, SettingsCommandAction,
-    SettingsCommandRequest, SettingsDescription, SettingsEntry, SettingsStatus, Tags,
+    ListQueriesResult, LogRecord, LogStatus, LoginResponse, MetadataChannel, MetadataResource,
+    Metrics, ModulesResult, PaginatedResponse, PingResult, QueryResult, ScriptRuntimes,
+    SettingsCommandAction, SettingsCommandRequest, SettingsDescription, SettingsEntry,
+    SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -278,6 +279,10 @@ pub trait ApiClientApi: Send + Sync {
     async fn list_events(&self) -> anyhow::Result<Vec<EventRecord>>;
     /// Drain the event store: the returned events are removed from the server.
     async fn clear_events(&self) -> anyhow::Result<Vec<EventRecord>>;
+    async fn list_metadata(&self) -> anyhow::Result<Vec<MetadataResource>>;
+    /// Performance counters, forwarded verbatim from `CheckSystem pdh --list`.
+    async fn get_metadata_counters(&self) -> anyhow::Result<Vec<serde_json::Value>>;
+    async fn get_metadata_channels(&self) -> anyhow::Result<Vec<MetadataChannel>>;
     async fn get_tags(&self) -> anyhow::Result<Tags>;
     async fn get_metrics(&self) -> anyhow::Result<Metrics>;
     /// Metrics in the OpenMetrics/Prometheus text exposition format.
@@ -431,6 +436,18 @@ impl ApiClientApi for ApiClient {
         Self::parse_json(response, path).await
     }
 
+    async fn list_metadata(&self) -> anyhow::Result<Vec<MetadataResource>> {
+        self.get_json("api/v2/metadata").await
+    }
+
+    async fn get_metadata_counters(&self) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.get_json("api/v2/metadata/counters").await
+    }
+
+    async fn get_metadata_channels(&self) -> anyhow::Result<Vec<MetadataChannel>> {
+        self.get_json("api/v2/metadata/channels").await
+    }
+
     async fn get_tags(&self) -> anyhow::Result<Tags> {
         self.get_json("api/v2/tags").await
     }
@@ -494,6 +511,9 @@ pub mod mocks {
             async fn logout(&self) -> anyhow::Result<()>;
             async fn list_events(&self) -> anyhow::Result<Vec<EventRecord>>;
             async fn clear_events(&self) -> anyhow::Result<Vec<EventRecord>>;
+            async fn list_metadata(&self) -> anyhow::Result<Vec<MetadataResource>>;
+            async fn get_metadata_counters(&self) -> anyhow::Result<Vec<serde_json::Value>>;
+            async fn get_metadata_channels(&self) -> anyhow::Result<Vec<MetadataChannel>>;
             async fn get_tags(&self) -> anyhow::Result<Tags>;
             async fn get_metrics(&self) -> anyhow::Result<Metrics>;
             async fn get_openmetrics(&self) -> anyhow::Result<String>;
@@ -822,6 +842,41 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn metadata_index_counters_and_channels() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "counters", "title": "Performance counters", "url": "u1"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/metadata/counters"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "\\Memory\\Available Bytes", "type": "large"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/metadata/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "NSCA", "plugins": ["NSCAClient"]}
+            ])))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(api.list_metadata().await.unwrap()[0].name, "counters");
+        assert_eq!(
+            api.get_metadata_counters().await.unwrap()[0]["type"],
+            "large"
+        );
+        let channels = api.get_metadata_channels().await.unwrap();
+        assert_eq!(channels[0].plugins, vec!["NSCAClient".to_string()]);
     }
 
     #[tokio::test]

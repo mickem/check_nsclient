@@ -7,6 +7,7 @@ mod generic_commands;
 mod login_helper;
 mod logs_commands;
 mod messages;
+mod metadata_commands;
 mod metrics_commands;
 mod module_commands;
 mod query_commands;
@@ -22,6 +23,7 @@ use crate::nsclient::auth_commands::route_auth_commands;
 use crate::nsclient::event_commands::route_event_commands;
 use crate::nsclient::generic_commands::{handle_ping_command, handle_version_command};
 use crate::nsclient::logs_commands::route_log_commands;
+use crate::nsclient::metadata_commands::route_metadata_commands;
 use crate::nsclient::metrics_commands::route_metrics_commands;
 use crate::nsclient::module_commands::route_module_commands;
 use crate::nsclient::query_commands::route_query_commands;
@@ -141,6 +143,9 @@ pub async fn route_ns_client(
         }
         NSClientCommands::Tags { command } => {
             route_tag_commands(output, build_client_from_profile(args)?, command).await?
+        }
+        NSClientCommands::Metadata { command } => {
+            route_metadata_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Logs { command } => {
             route_log_commands(output, build_client_from_profile(args)?, command).await?
