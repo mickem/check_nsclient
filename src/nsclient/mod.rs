@@ -2,6 +2,7 @@ mod alias_commands;
 mod api;
 mod auth_commands;
 pub mod client;
+mod event_commands;
 mod generic_commands;
 mod login_helper;
 mod logs_commands;
@@ -17,6 +18,7 @@ use crate::config;
 use crate::nsclient::alias_commands::route_alias_commands;
 use crate::nsclient::api::{ApiClient, ApiClientApi, Auth};
 use crate::nsclient::auth_commands::route_auth_commands;
+use crate::nsclient::event_commands::route_event_commands;
 use crate::nsclient::generic_commands::{handle_ping_command, handle_version_command};
 use crate::nsclient::logs_commands::route_log_commands;
 use crate::nsclient::metrics_commands::route_metrics_commands;
@@ -131,6 +133,9 @@ pub async fn route_ns_client(
         }
         NSClientCommands::Aliases { command } => {
             route_alias_commands(output, build_client_from_profile(args)?, command).await?
+        }
+        NSClientCommands::Events { command } => {
+            route_event_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Logs { command } => {
             route_log_commands(output, build_client_from_profile(args)?, command).await?

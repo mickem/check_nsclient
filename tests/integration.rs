@@ -825,6 +825,55 @@ fn aliases_list() {
 }
 
 // ---------------------------------------------------------------------------
+// events
+// ---------------------------------------------------------------------------
+
+#[test]
+fn events_list_and_clear() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    // The store is usually empty on a freshly started Linux agent (it fills
+    // from eventlog / real-time filters), so the contract under test is the
+    // shape of the response and that draining it is accepted.
+    let events = client.json(&["events", "list"]);
+    let list = events.as_array().expect("an array of events");
+    for event in list {
+        assert!(event["index"].is_number(), "{event}");
+        assert!(event["event"].is_string(), "{event}");
+        assert!(event["date"].is_string(), "{event}");
+        assert!(event["data"].is_object(), "{event}");
+    }
+
+    let text = client.text(&["events", "list"]);
+    assert!(
+        text.contains("index"),
+        "the header is always rendered: {text}"
+    );
+
+    // `clear` drains the store and hands back what it removed.
+    let drained = client.json(&["events", "clear"]);
+    assert!(drained.is_array(), "{drained}");
+    assert_eq!(
+        drained.as_array().unwrap().len(),
+        list.len(),
+        "clear should return the events that were buffered"
+    );
+
+    // Everything was drained, so a second clear finds nothing.
+    let again = client.json(&["events", "clear"]);
+    assert!(again.as_array().unwrap().is_empty(), "{again}");
+    assert!(
+        client
+            .json(&["events", "list"])
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the store should be empty after draining it"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // logs
 // ---------------------------------------------------------------------------
 

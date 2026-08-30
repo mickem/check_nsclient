@@ -86,6 +86,11 @@ pub enum NSClientCommands {
         #[command(subcommand)]
         command: AliasesCommand,
     },
+    /// Inspect the event store
+    Events {
+        #[command(subcommand)]
+        command: EventsCommand,
+    },
     /// Inspect/acknowledge logs
     Logs {
         #[command(subcommand)]
@@ -225,6 +230,14 @@ pub enum AliasesCommand {
         #[arg(short, long)]
         long: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum EventsCommand {
+    /// List buffered events
+    List {},
+    /// Drain the event store (shows the events that were removed)
+    Clear {},
 }
 
 #[derive(Subcommand)]

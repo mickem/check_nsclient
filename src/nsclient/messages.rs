@@ -289,6 +289,45 @@ pub struct ListQueriesResult {
     pub plugin: String,
 }
 
+/// One entry from the event store (event log hits, real-time filter matches, ...).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub index: i64,
+    pub event: String,
+    pub date: String,
+    #[serde(default)]
+    pub data: HashMap<String, String>,
+}
+
+impl EventRecord {
+    pub fn to_flat(&self) -> FlatEventRecord {
+        let mut data: Vec<String> = self
+            .data
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        data.sort();
+        FlatEventRecord {
+            index: self.index,
+            date: self.date.clone(),
+            event: self.event.clone(),
+            data: data.join(", "),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct FlatEventRecord {
+    #[tabled()]
+    pub index: i64,
+    #[tabled()]
+    pub date: String,
+    #[tabled()]
+    pub event: String,
+    #[tabled()]
+    pub data: String,
+}
+
 /// A query alias: an admin defined wrapper around a real check command.
 #[derive(Debug, Serialize, Deserialize, Tabled)]
 pub struct AliasResult {
