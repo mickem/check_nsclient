@@ -41,6 +41,18 @@ pub struct LogStatus {
     pub last_error: Option<String>,
 }
 
+impl LogStatus {
+    pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
+        let mut map = IndexMap::new();
+        map.insert("errors".to_string(), self.errors.to_string());
+        map.insert(
+            "last_error".to_string(),
+            self.last_error.clone().unwrap_or_default(),
+        );
+        map
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Tabled)]
 pub struct ScriptRuntimes {
     #[tabled()]
@@ -53,8 +65,7 @@ pub struct ScriptRuntimes {
 
 pub type Metrics = HashMap<String, Value>;
 
-#[derive(Debug, Serialize)]
-#[serde(bound(serialize = "T: Serialize"))]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PaginatedResponse<T> {
     pub content: T,
     pub page: u64,
