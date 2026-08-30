@@ -81,39 +81,42 @@ pub fn build_client(
     Ok(Box::new(client))
 }
 
+/// Route an `nsclient` sub command and return the process exit code.
 pub async fn route_ns_client(
     output: Rendering,
     args: &NSClientCommandOptions,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     match &args.command {
         NSClientCommands::Ping {} => {
-            handle_ping_command(output, build_client_from_profile(args)?).await
+            handle_ping_command(output, build_client_from_profile(args)?).await?
         }
         NSClientCommands::Version {} => {
-            handle_version_command(output, build_client_from_profile(args)?).await
+            handle_version_command(output, build_client_from_profile(args)?).await?
         }
         NSClientCommands::Modules { command } => {
-            route_module_commands(output, build_client_from_profile(args)?, command).await
+            route_module_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Queries { command } => {
-            route_query_commands(output, build_client_from_profile(args)?, command).await
+            return route_query_commands(output, build_client_from_profile(args)?, command).await;
         }
         NSClientCommands::Logs { command } => {
-            route_log_commands(output, build_client_from_profile(args)?, command).await
+            route_log_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Scripts { command } => {
-            route_script_commands(output, build_client_from_profile(args)?, command).await
+            route_script_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Settings { command } => {
-            route_settings_commands(output, build_client_from_profile(args)?, command).await
+            route_settings_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Metrics { command } => {
-            route_metrics_commands(output, build_client_from_profile(args)?, command).await
+            route_metrics_commands(output, build_client_from_profile(args)?, command).await?
         }
-        NSClientCommands::Auth { command } => route_auth_commands(output, command).await,
-        NSClientCommands::Client {} => client::run_client(build_client_from_profile(args)?).await,
-        NSClientCommands::Test {} => client::run_client(build_client_from_profile(args)?).await,
+        NSClientCommands::Auth { command } => route_auth_commands(output, command).await?,
+        NSClientCommands::Client {} | NSClientCommands::Test {} => {
+            client::run_client(build_client_from_profile(args)?).await?
+        }
     }
+    Ok(0)
 }
 #[cfg(test)]
 mod tests {

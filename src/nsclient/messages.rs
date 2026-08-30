@@ -418,11 +418,20 @@ pub struct ExecuteNagiosLine {
 }
 
 impl ExecuteNagiosLine {
+    /// Human friendly rendering (used by the interactive client).
     pub(crate) fn render(&self) -> String {
         if self.perf.is_empty() {
             return self.message.clone();
         }
         format!("{} | {}", self.message, self.perf)
+    }
+
+    /// Nagios plugin output format: `message|perfdata`.
+    pub(crate) fn render_nagios(&self) -> String {
+        if self.perf.is_empty() {
+            return self.message.clone();
+        }
+        format!("{}|{}", self.message, self.perf)
     }
 }
 

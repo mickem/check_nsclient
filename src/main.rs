@@ -29,11 +29,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::NSClient(args) => {
             let output_sink = Box::new(PrintRender::new());
 
-            route_ns_client(
+            let exit_code = route_ns_client(
                 Rendering::new(cli.output, cli.output_style, cli.output_long, output_sink),
                 args,
             )
-            .await?
+            .await?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Commands::Version {} => {
             println!("Version: {}", env!("CARGO_PKG_VERSION"));

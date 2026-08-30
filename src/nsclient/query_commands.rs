@@ -2,65 +2,62 @@ use crate::cli::QueriesCommand;
 use crate::nsclient::api::ApiClientApi;
 use crate::rendering::Rendering;
 
+/// Route a `queries` sub command.
+///
+/// Returns the process exit code: `execute-nagios` maps the check result to the Nagios
+/// exit code (0-3), everything else returns 0 on success.
 pub async fn route_query_commands(
     output: Rendering,
     api: Box<dyn ApiClientApi>,
     command: &QueriesCommand,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     match &command {
         QueriesCommand::List { all, long } => match api.list_queries(all).await {
             Ok(queries) => {
                 if output.is_flat() {
-                    output.render_flat_list(&queries, long, &["description"])
+                    output.render_flat_list(&queries, long, &["description"])?;
                 } else {
-                    output.render_nested_list(&queries)
+                    output.render_nested_list(&queries)?;
                 }
+                Ok(0)
             }
             Err(e) => anyhow::bail!("Failed to fetch queries: {:#}", e),
         },
         &QueriesCommand::Show { id } => match api.get_query(id).await {
             Ok(query) => {
                 if output.is_flat() {
-                    output.render_flat_single(&query.to_dict())
+                    output.render_flat_single(&query.to_dict())?;
                 } else {
-                    output.render_nested_single(&query)
+                    output.render_nested_single(&query)?;
                 }
+                Ok(0)
             }
             Err(e) => anyhow::bail!("Failed to fetch query {id}: {:#}", e),
         },
         &QueriesCommand::Execute { id, args } => match api.execute_query(id, args).await {
             Ok(result) => {
                 if output.is_flat() {
-                    output.render_flat_single(&result.to_dict())
+                    output.render_flat_single(&result.to_dict())?;
                 } else {
-                    output.render_nested_single(&result)
+                    output.render_nested_single(&result)?;
                 }
+                Ok(0)
             }
             Err(e) => anyhow::bail!("Failed to execute query {id}: {:#}", e),
         },
         &QueriesCommand::ExecuteNagios { id, args } => {
             match api.execute_query_nagios(id, args).await {
                 Ok(result) => {
-                    let exit = result.get_exit_code();
                     if output.is_text() {
-                        for line in result.lines {
-                            if line.perf.is_empty() {
-                                println!("{}", line.message);
-                            } else {
-                                println!("{}|{}", line.message, line.perf);
-                            }
+                        for line in &result.lines {
+                            output.print(&line.render_nagios());
                         }
-                        std::process::exit(exit);
-                    }
-                    if let Err(e) = if output.is_flat() {
-                        output.render_flat_single(&result.to_dict())
+                    } else if output.is_flat() {
+                        output.render_flat_single(&result.to_dict())?;
                     } else {
-                        output.render_nested_single(&result)
-                    } {
-                        eprintln!("Failed to render output: {:#}", e);
-                        std::process::exit(4);
+                        output.render_nested_single(&result)?;
                     }
-                    std::process::exit(exit);
+                    Ok(result.get_exit_code())
                 }
                 Err(e) => anyhow::bail!("Failed to execute query {id}: {:#}", e),
             }
@@ -74,7 +71,8 @@ mod tests {
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
     use crate::nsclient::messages::{
-        ExecuteLine, ExecuteResult, ListQueriesResult, PerfData, QueryResult,
+        ExecuteLine, ExecuteNagiosLine, ExecuteNagiosResult, ExecuteResult, ListQueriesResult,
+        PerfData, QueryResult,
     };
     use crate::rendering::StringRender;
     use anyhow::anyhow;
@@ -234,6 +232,91 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("│ result   │ OK"), "{rendered}");
+    }
+
+    fn nagios_result(status: &str) -> ExecuteNagiosResult {
+        ExecuteNagiosResult {
+            command: "check_cpu".into(),
+            lines: vec![
+                ExecuteNagiosLine {
+                    message: "WARNING: CPU load is high.".into(),
+                    perf: "'total 5m'=85%;80;90".into(),
+                },
+                ExecuteNagiosLine {
+                    message: "second line".into(),
+                    perf: String::new(),
+                },
+            ],
+            result: status.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_nagios_text_prints_nagios_format_and_returns_exit_code() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_execute_query_nagios()
+            .withf(|id, args| id == "check_cpu" && args.is_empty())
+            .returning(|_, _| Ok(nagios_result("WARNING")));
+        let (output, output_ref) = rendering(OutputFormat::Text);
+
+        let code = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::ExecuteNagios {
+                id: "check_cpu".into(),
+                args: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(code, 1);
+        assert_eq!(
+            output_ref.borrow().as_str(),
+            "WARNING: CPU load is high.|'total 5m'=85%;80;90\nsecond line\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_nagios_json_returns_exit_code() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_execute_query_nagios()
+            .returning(|_, _| Ok(nagios_result("CRITICAL")));
+        let (output, output_ref) = rendering(OutputFormat::Json);
+
+        let code = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::ExecuteNagios {
+                id: "check_cpu".into(),
+                args: vec![],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(code, 2);
+        let parsed: serde_json::Value = serde_json::from_str(&output_ref.borrow()).unwrap();
+        assert_eq!(parsed["result"], "CRITICAL");
+        assert_eq!(parsed["lines"][0]["perf"], "'total 5m'=85%;80;90");
+    }
+
+    #[tokio::test]
+    async fn successful_commands_return_zero() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_list_queries().returning(|_| Ok(vec![]));
+        let (output, _) = rendering(OutputFormat::Json);
+        let code = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::List {
+                all: false,
+                long: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0);
     }
 
     #[tokio::test]
