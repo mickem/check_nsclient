@@ -28,7 +28,7 @@ pub async fn handle_version_command(
                 output.render_nested_single(&item)
             }
         }
-        Err(e) => anyhow::bail!("Failed to fetch version from: {:#}", e),
+        Err(e) => anyhow::bail!("Failed to fetch version: {:#}", e),
     }
 }
 
@@ -209,7 +209,7 @@ version,0.5.2.35
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Failed to fetch version from")
+                .contains("Failed to fetch version")
         );
     }
 }
