@@ -1001,6 +1001,63 @@ fn logs_list_status_and_reset() {
     );
 }
 
+#[test]
+fn logs_add_then_clear() {
+    let target = require_target!();
+    let client = Client::login(&target);
+
+    let marker = format!("it-log-{}", std::process::id());
+    let out = client.ns(
+        &[],
+        &[
+            "logs",
+            "add",
+            "--message",
+            &marker,
+            "--level",
+            "warning",
+            "--file",
+            "it.rs",
+            "--line",
+            "42",
+        ],
+    );
+    assert_success(&out, "logs add");
+    assert_eq!(stdout(&out).trim(), "Log record added");
+
+    // The record shows up in the buffer with the level and location we gave.
+    let page = client.json(&["logs", "list", "--size", "100"]);
+    let record = page["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["message"].as_str().unwrap().contains(&marker))
+        .unwrap_or_else(|| panic!("the record we added is missing from {page}"));
+    assert_eq!(record["level"], "warning", "{record}");
+    assert_eq!(record["file"], "it.rs", "{record}");
+    assert_eq!(record["line"], 42, "{record}");
+
+    // Clearing drops the buffer (the agent keeps logging, so only our own
+    // record is guaranteed to be gone).
+    let out = client.ns(&[], &["logs", "clear"]);
+    assert_success(&out, "logs clear");
+    assert!(
+        stdout(&out).trim().starts_with("Cleared "),
+        "{}",
+        stdout(&out)
+    );
+
+    let page = client.json(&["logs", "list", "--size", "100"]);
+    assert!(
+        !page["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["message"].as_str().unwrap().contains(&marker)),
+        "the record survived `logs clear`: {page}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // scripts
 // ---------------------------------------------------------------------------

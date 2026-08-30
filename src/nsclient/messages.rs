@@ -35,6 +35,22 @@ pub struct LogRecord {
     pub message: String,
 }
 
+/// A log record submitted to the agent.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NewLogRecord {
+    pub level: String,
+    pub message: String,
+    pub file: String,
+    pub line: u64,
+}
+
+/// How many buffered log records the server dropped.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LogClearResult {
+    #[serde(default)]
+    pub count: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogStatus {
     pub errors: u64,

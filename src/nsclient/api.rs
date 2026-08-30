@@ -4,10 +4,10 @@ use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
     AliasResult, EventRecord, ExecuteNagiosResult, ExecuteResult, ListModulesResult,
-    ListQueriesResult, LogRecord, LogStatus, LoginResponse, MetadataChannel, MetadataResource,
-    Metrics, ModulesResult, PaginatedResponse, PingResult, QueryResult, ScriptRuntimes,
-    SettingsCommandAction, SettingsCommandRequest, SettingsDeleteResult, SettingsDescription,
-    SettingsDiff, SettingsEntry, SettingsStatus, Tags,
+    ListQueriesResult, LogClearResult, LogRecord, LogStatus, LoginResponse, MetadataChannel,
+    MetadataResource, Metrics, ModulesResult, NewLogRecord, PaginatedResponse, PingResult,
+    QueryResult, ScriptRuntimes, SettingsCommandAction, SettingsCommandRequest,
+    SettingsDeleteResult, SettingsDescription, SettingsDiff, SettingsEntry, SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -257,7 +257,12 @@ pub trait ApiClientApi: Send + Sync {
         since: usize,
     ) -> anyhow::Result<(PaginatedResponse<Vec<LogRecord>>, usize)>;
     async fn get_log_status(&self) -> anyhow::Result<LogStatus>;
+    /// Reset the aggregated error counters (keeps the buffered records).
     async fn reset_log_status(&self) -> anyhow::Result<()>;
+    /// Drop every buffered log record.
+    async fn clear_logs(&self) -> anyhow::Result<LogClearResult>;
+    /// Append a record to the agent log.
+    async fn add_log(&self, record: &NewLogRecord) -> anyhow::Result<()>;
     async fn list_modules(&self, all: &bool) -> anyhow::Result<Vec<ListModulesResult>>;
     async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult>;
     async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
@@ -367,6 +372,16 @@ impl ApiClientApi for ApiClient {
 
     async fn reset_log_status(&self) -> anyhow::Result<()> {
         self.delete("api/v2/logs/status").await
+    }
+
+    async fn clear_logs(&self) -> anyhow::Result<LogClearResult> {
+        let path = "api/v2/logs";
+        let response = self.send(Method::DELETE, path, |b| b).await?;
+        Self::parse_json(response, path).await
+    }
+
+    async fn add_log(&self, record: &NewLogRecord) -> anyhow::Result<()> {
+        self.send_json(Method::POST, "api/v2/logs", record).await
     }
 
     async fn list_modules(&self, all: &bool) -> anyhow::Result<Vec<ListModulesResult>> {
@@ -553,6 +568,8 @@ pub mod mocks {
             async fn get_logs_since(&self, page: u64, size: u64, since: usize) -> anyhow::Result<(PaginatedResponse<Vec<LogRecord>>, usize)>;
             async fn get_log_status(&self) -> anyhow::Result<LogStatus>;
             async fn reset_log_status(&self) -> anyhow::Result<()>;
+            async fn clear_logs(&self) -> anyhow::Result<LogClearResult>;
+            async fn add_log(&self, record: &NewLogRecord) -> anyhow::Result<()>;
             async fn list_modules(&self, all: &bool) -> anyhow::Result<Vec<ListModulesResult>>;
             async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult>;
             async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
@@ -919,6 +936,44 @@ mod tests {
         assert_eq!(page.content[0].message, "boom");
         assert_eq!(page.count, 25);
         assert_eq!(page.pages, 3);
+    }
+
+    #[tokio::test]
+    async fn logs_are_cleared_and_appended() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/logs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"count": 12})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/logs"))
+            .and(body_json(serde_json::json!({
+                "level": "info",
+                "message": "hello",
+                "file": "cli",
+                "line": 1
+            })))
+            // The endpoint answers with an empty body, which must not be
+            // treated as a decoding failure.
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(api.clear_logs().await.unwrap().count, 12);
+        api.add_log(&NewLogRecord {
+            level: "info".into(),
+            message: "hello".into(),
+            file: "cli".into(),
+            line: 1,
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

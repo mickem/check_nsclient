@@ -1,6 +1,6 @@
 use crate::cli::LogsCommand;
 use crate::nsclient::api::ApiClientApi;
-use crate::nsclient::messages::LogStatus;
+use crate::nsclient::messages::{LogStatus, NewLogRecord};
 use crate::rendering::Rendering;
 
 pub async fn route_log_commands(
@@ -28,6 +28,33 @@ pub async fn route_log_commands(
             Ok(status) => output.render_single(&status, LogStatus::to_dict),
             Err(e) => anyhow::bail!("Failed to obtain log status: {:#}", e),
         },
+        LogsCommand::Clear {} => match api.clear_logs().await {
+            Ok(result) => {
+                output.print(&format!("Cleared {} log record(s)", result.count));
+                Ok(())
+            }
+            Err(e) => anyhow::bail!("Failed to clear logs: {:#}", e),
+        },
+        LogsCommand::Add {
+            message,
+            level,
+            file,
+            line,
+        } => {
+            let record = NewLogRecord {
+                level: level.clone(),
+                message: message.clone(),
+                file: file.clone(),
+                line: *line,
+            };
+            match api.add_log(&record).await {
+                Ok(()) => {
+                    output.print("Log record added");
+                    Ok(())
+                }
+                Err(e) => anyhow::bail!("Failed to add log record: {:#}", e),
+            }
+        }
         LogsCommand::Reset {} => match api.reset_log_status().await {
             Ok(()) => {
                 output.print("Successfully reset log status");
@@ -43,7 +70,7 @@ mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::{LogRecord, PaginatedResponse};
+    use crate::nsclient::messages::{LogClearResult, LogRecord, PaginatedResponse};
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;
@@ -239,6 +266,79 @@ mod tests {
             output_ref.borrow().as_str(),
             "Successfully reset log status\n"
         );
+    }
+
+    #[tokio::test]
+    async fn clear_reports_how_many_records_were_dropped() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_clear_logs()
+            .times(1)
+            .returning(|| Ok(LogClearResult { count: 12 }));
+        let (output, out) = rendering(OutputFormat::Text, false);
+
+        route_log_commands(output, Box::new(api), &LogsCommand::Clear {})
+            .await
+            .unwrap();
+
+        assert_eq!(out.borrow().as_str(), "Cleared 12 log record(s)\n");
+    }
+
+    #[tokio::test]
+    async fn add_sends_the_record_with_defaults_applied_by_the_cli() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_add_log()
+            .withf(|record| {
+                record.level == "warning"
+                    && record.message == "from the cli"
+                    && record.file == "check_nsclient"
+                    && record.line == 7
+            })
+            .times(1)
+            .returning(|_| Ok(()));
+        let (output, out) = rendering(OutputFormat::Text, false);
+
+        route_log_commands(
+            output,
+            Box::new(api),
+            &LogsCommand::Add {
+                message: "from the cli".into(),
+                level: "warning".into(),
+                file: "check_nsclient".into(),
+                line: 7,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.borrow().as_str(), "Log record added\n");
+    }
+
+    #[tokio::test]
+    async fn clear_and_add_errors_are_reported() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_clear_logs().returning(|| Err(anyhow!("boom")));
+        let (output, _) = rendering(OutputFormat::Text, false);
+        let err = route_log_commands(output, Box::new(api), &LogsCommand::Clear {})
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Failed to clear logs: boom");
+
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_add_log().returning(|_| Err(anyhow!("boom")));
+        let (output, _) = rendering(OutputFormat::Text, false);
+        let err = route_log_commands(
+            output,
+            Box::new(api),
+            &LogsCommand::Add {
+                message: "m".into(),
+                level: "info".into(),
+                file: "f".into(),
+                line: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Failed to add log record: boom");
     }
 
     #[tokio::test]

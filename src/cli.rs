@@ -287,6 +287,23 @@ pub enum LogsCommand {
     Status {},
     /// Reset aggregated log status counters
     Reset {},
+    /// Drop every buffered log record
+    Clear {},
+    /// Append a record to the agent log
+    Add {
+        /// Message to log
+        #[arg(long)]
+        message: String,
+        /// Level to log at (debug/info/warning/error)
+        #[arg(long, default_value = "info")]
+        level: String,
+        /// File to attribute the record to
+        #[arg(long, default_value = "check_nsclient")]
+        file: String,
+        /// Line to attribute the record to
+        #[arg(long, default_value_t = 0)]
+        line: u64,
+    },
 }
 
 #[derive(Subcommand)]
