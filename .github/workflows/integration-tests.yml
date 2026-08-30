@@ -20,8 +20,8 @@ on:
         default: ''
 
 jobs:
-  integration:
-    name: check_nsclient vs NSClient++ ${{ inputs.nscp-version || '(pinned)' }}
+  linux:
+    name: Linux (Docker, .deb) vs NSClient++ ${{ inputs.nscp-version || '(pinned)' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -104,3 +104,32 @@ jobs:
       - name: Stop NSClient++
         if: always()
         run: docker rm -f nscp || true
+
+  windows:
+    name: Windows (native, .zip) vs NSClient++ ${{ inputs.nscp-version || '(pinned)' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-integration-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build check_nsclient and the test binary
+        run: cargo test --test integration --no-run
+
+      # Downloads the release zip, enables the REST API, runs `nscp test` in the
+      # background and executes the suite against it (see the script header).
+      - name: Run integration tests
+        shell: pwsh
+        env:
+          NSCP_VERSION: ${{ inputs.nscp-version }}
+        run: tests/integration/run-windows.ps1

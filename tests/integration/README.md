@@ -9,15 +9,17 @@ in Rust/cargo.
 
 The suite lives in [`../integration.rs`](../integration.rs). It is **skipped**
 (every test passes with a notice) unless `CHECK_NSCLIENT_IT_URL` is set, so a
-plain `cargo test` never needs Docker.
+plain `cargo test` never needs a server.
 
-## Requirements
+Two ways to provide the server, both driven by the version in `.nscp_version`
+(override with `NSCP_VERSION`):
 
-- Docker (Docker Desktop with Linux containers on Windows)
-- Rust toolchain
-- `curl` (used by `run.sh` to wait for the server)
+| Script                       | Server                                              | Needs   |
+| ---------------------------- | --------------------------------------------------- | ------- |
+| `run.sh` / `run.ps1`         | Ubuntu 24.04 container + official `.deb`            | Docker  |
+| `run-windows.ps1`            | Native Windows `nscp.exe` from the official `.zip`  | Windows |
 
-## Quick start
+## Docker (Linux package)
 
 ```sh
 tests/integration/run.sh                       # NSClient++ version from .nscp_version
@@ -26,20 +28,39 @@ tests/integration/run.sh -- --nocapture        # extra args go to `cargo test`
 ```
 
 ```powershell
-tests\integration\run.ps1
-$env:NSCP_VERSION = "0.17.0"; tests\integration\run.ps1
+tests\integration\run.ps1                      # Docker Desktop, Linux containers
 ```
 
 The script builds `tests/integration/Dockerfile` (Ubuntu 24.04 + the official
 `.deb` from the nscp GitHub release), starts it on port 8443, runs
 `cargo test --test integration` and removes the container again.
 
-| Variable        | Default              | Purpose                                  |
-| --------------- | -------------------- | ---------------------------------------- |
-| `NSCP_VERSION`  | `.nscp_version` file | NSClient++ release to download and test  |
-| `NSCP_ARCH`     | host arch            | `amd64` or `arm64` package               |
-| `NSCP_PASSWORD` | `it-password`        | REST password baked into the image       |
-| `NSCP_PORT`     | `8443`               | Host port the container is published on  |
+| Variable        | Default              | Purpose                                 |
+| --------------- | -------------------- | --------------------------------------- |
+| `NSCP_VERSION`  | `.nscp_version` file | NSClient++ release to download and test |
+| `NSCP_ARCH`     | host arch            | `amd64` or `arm64` package              |
+| `NSCP_PASSWORD` | `it-password`        | REST password baked into the image      |
+| `NSCP_PORT`     | `8443`               | Host port the container is published on |
+
+## Native Windows (release zip, no Docker)
+
+`run-windows.ps1` downloads `NSCP-<version>-x64.zip` from the release, extracts
+it under `target\nscp-<version>-x64\`, enables the REST API, starts `nscp test`
+in the background and runs the same suite against it:
+
+```powershell
+tests\integration\run-windows.ps1
+$env:NSCP_VERSION = "0.17.0"; tests\integration\run-windows.ps1
+$env:NSCP_PLATFORM = "Win32"; tests\integration\run-windows.ps1
+```
+
+| Variable        | Default                            | Purpose                        |
+| --------------- | ---------------------------------- | ------------------------------ |
+| `NSCP_VERSION`  | `.nscp_version` file               | NSClient++ release to download |
+| `NSCP_PLATFORM` | `x64`                              | `x64` or `Win32` zip           |
+| `NSCP_PASSWORD` | `it-password`                      | REST password                  |
+| `NSCP_PORT`     | `8443`                             | Web server port                |
+| `NSCP_DIR`      | `target\nscp-<version>-<platform>` | Extraction directory           |
 
 ## Against a server you started yourself
 
@@ -54,8 +75,8 @@ CHECK_NSCLIENT_IT_PASSWORD=secret \
 
 The server needs the REST API (WEBServer) enabled with the `CheckHelpers`,
 `CheckSystem`, `CheckDisk`, `CheckExternalScripts` and `LUAScript` modules
-loaded — see the Dockerfile for the exact `nscp settings` / `nscp web install`
-commands.
+loaded — see the Dockerfile or `run-windows.ps1` for the exact
+`nscp settings` / `nscp web install` commands.
 
 ## What the tests touch
 
@@ -71,9 +92,10 @@ commands.
 
 ## CI
 
-`.github/workflows/integration-tests.yml` runs the same flow on `ubuntu-latest`.
-It is called from the feature and main build workflows and can be started
-manually (*Actions → Integration tests → Run workflow*) with a different
-`nscp-version`. On Linux the keyring is backed by a `gnome-keyring` daemon
-started inside `dbus-run-session`, because GitHub runners have no desktop
-session to provide a Secret Service.
+`.github/workflows/integration-tests.yml` runs both flavours: the Docker/.deb
+flow on `ubuntu-latest` and the native zip flow on `windows-latest`. It is called
+from the feature and main build workflows and can be started manually
+(*Actions → Integration tests → Run workflow*) with a different `nscp-version`.
+On Linux the keyring is backed by a `gnome-keyring` daemon started inside
+`dbus-run-session`, because GitHub runners have no desktop session to provide a
+Secret Service; on Windows the native credential manager is used as-is.
