@@ -234,8 +234,8 @@ impl StringRender {
 #[cfg(test)]
 impl RenderToString for StringRender {
     fn render(&self, str: &str) {
-        self.string.borrow_mut().push_str(&str);
-        self.string.borrow_mut().push_str("\n");
+        self.string.borrow_mut().push_str(str);
+        self.string.borrow_mut().push('\n');
     }
 }
 

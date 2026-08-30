@@ -184,7 +184,7 @@ mod tests {
         let profile = get_nsclient_profile("test1").unwrap().unwrap();
         assert_eq!(profile.id, "test1");
         assert_eq!(profile.url, "http://localhost:8080");
-        assert_eq!(profile.insecure, false);
+        assert!(!profile.insecure);
         let api_key = get_api_key("test1").unwrap();
         assert_eq!(api_key, "apikey1");
         assert_eq!(get_password("test1").unwrap(), "password");

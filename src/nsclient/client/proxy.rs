@@ -3,7 +3,6 @@ use crate::nsclient::client::command_input::{CommandType, ModuleCommand, QueryCo
 use crate::nsclient::client::events::{UICommand, UIEvent, send_or_error};
 use crate::nsclient::client::log_widget::{LogLevel, LogRecord};
 use crate::nsclient::messages::Metrics;
-use std::collections::HashMap;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
@@ -283,6 +282,7 @@ fn get_float(metrics: &Metrics, key: &str) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn get_float_handles_missing_and_non_numeric_values() {
