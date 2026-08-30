@@ -371,6 +371,12 @@ pub enum SettingsCommand {
     },
     /// Show setting descriptions
     Descriptions {
+        /// Only describe keys under this path (default: everything)
+        #[arg(long, default_value = "")]
+        path: String,
+        /// Include sample keys
+        #[arg(long)]
+        samples: bool,
         /// Show all information (same as --output-long)
         #[arg(short, long)]
         long: bool,

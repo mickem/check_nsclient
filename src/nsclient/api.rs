@@ -306,7 +306,12 @@ pub trait ApiClientApi: Send + Sync {
         path: &str,
         key: Option<String>,
     ) -> anyhow::Result<SettingsDeleteResult>;
-    async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
+    /// Setting descriptions under `path`; `samples` also returns sample keys.
+    async fn get_settings_descriptions(
+        &self,
+        path: &str,
+        samples: &bool,
+    ) -> anyhow::Result<Vec<SettingsDescription>>;
     /// The changes made since the last save, optionally limited to `path`.
     async fn get_settings_diff(&self, path: &str) -> anyhow::Result<SettingsDiff>;
     async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()>;
@@ -497,8 +502,14 @@ impl ApiClientApi for ApiClient {
         Self::parse_json(response, &url).await
     }
 
-    async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>> {
-        self.get_json("api/v2/settings/descriptions").await
+    async fn get_settings_descriptions(
+        &self,
+        path: &str,
+        samples: &bool,
+    ) -> anyhow::Result<Vec<SettingsDescription>> {
+        let params = [("samples".to_string(), samples.to_string())];
+        self.get_with_query(&format!("api/v2/settings/descriptions{path}"), &params)
+            .await
     }
 
     async fn get_settings_diff(&self, path: &str) -> anyhow::Result<SettingsDiff> {
@@ -611,7 +622,7 @@ pub mod mocks {
             async fn get_settings_status(&self) -> anyhow::Result<SettingsStatus>;
             async fn get_settings(&self, path: &str) -> anyhow::Result<Vec<SettingsEntry>>;
             async fn delete_settings(&self, path: &str, key: Option<String>) -> anyhow::Result<SettingsDeleteResult>;
-            async fn get_settings_descriptions(&self) -> anyhow::Result<Vec<SettingsDescription>>;
+            async fn get_settings_descriptions(&self, path: &str, samples: &bool) -> anyhow::Result<Vec<SettingsDescription>>;
             async fn get_settings_diff(&self, path: &str) -> anyhow::Result<SettingsDiff>;
             async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()>;
             async fn settings_command(
@@ -1023,6 +1034,42 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_descriptions_take_a_path_and_samples_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/settings/descriptions/settings/WEB/server"))
+            .and(query_param("samples", "true"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "default_value": "8443",
+                    "description": "The port to listen on",
+                    "icon": "icon",
+                    "is_advanced_key": false,
+                    "is_object": false,
+                    "is_sample_key": false,
+                    "is_template_key": false,
+                    "key": "port",
+                    "path": "/settings/WEB/server",
+                    "type": "string",
+                    "plugins": ["WEBServer"],
+                    "sample_usage": "",
+                    "title": "Port",
+                    "value": "8443"
+                }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let descriptions = api
+            .get_settings_descriptions("/settings/WEB/server", &true)
+            .await
+            .unwrap();
+        assert_eq!(descriptions[0].key, "port");
     }
 
     #[tokio::test]

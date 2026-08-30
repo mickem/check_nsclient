@@ -1299,6 +1299,34 @@ fn settings_status_list_and_descriptions() {
     let out = client.ns(&["--output-long"], &["settings", "descriptions"]);
     assert_success(&out, "settings descriptions --output-long");
     assert!(stdout(&out).contains("default_value"), "{}", stdout(&out));
+
+    // A path filter narrows the listing to that section.
+    let scoped = client.json(&["settings", "descriptions", "--path", "/settings/WEB/server"]);
+    let scoped = scoped.as_array().expect("an array of descriptions");
+    assert!(!scoped.is_empty(), "the web server section is described");
+    assert!(
+        scoped.len() < descriptions.len(),
+        "a filtered listing must be smaller than the whole set"
+    );
+    for description in scoped {
+        assert!(
+            description["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/settings/WEB/server"),
+            "{description}"
+        );
+    }
+
+    // Sample keys are only returned when asked for.
+    let with_samples = client.json(&[
+        "settings",
+        "descriptions",
+        "--path",
+        "/settings/WEB/server",
+        "--samples",
+    ]);
+    assert!(with_samples.as_array().unwrap().len() >= scoped.len());
 }
 
 #[test]

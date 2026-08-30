@@ -27,7 +27,11 @@ pub async fn route_settings_commands(
             Ok(settings) => output.render_rows(&settings, &false, &[]),
             Err(e) => anyhow::bail!("Failed to fetch settings entries: {:#}", e),
         },
-        SettingsCommand::Descriptions { long } => match api.get_settings_descriptions().await {
+        SettingsCommand::Descriptions {
+            path,
+            samples,
+            long,
+        } => match api.get_settings_descriptions(path, samples).await {
             Ok(descriptions) => output.render_list(
                 &descriptions,
                 SettingsDescription::to_flat,
@@ -418,13 +422,17 @@ mod tests {
     async fn descriptions_hide_details_unless_long() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_get_settings_descriptions()
-            .returning(|| Ok(vec![description()]));
+            .returning(|_, _| Ok(vec![description()]));
         let (output, out) = rendering(OutputFormat::Text, false);
 
         route_settings_commands(
             output,
             Box::new(api),
-            &SettingsCommand::Descriptions { long: false },
+            &SettingsCommand::Descriptions {
+                path: String::new(),
+                samples: false,
+                long: false,
+            },
         )
         .await
         .unwrap();
@@ -438,13 +446,17 @@ mod tests {
 
         let mut api = MockApiClientApiImpl::new();
         api.expect_get_settings_descriptions()
-            .returning(|| Ok(vec![description()]));
+            .returning(|_, _| Ok(vec![description()]));
         let (output, out) = rendering(OutputFormat::Text, false);
 
         route_settings_commands(
             output,
             Box::new(api),
-            &SettingsCommand::Descriptions { long: true },
+            &SettingsCommand::Descriptions {
+                path: String::new(),
+                samples: false,
+                long: true,
+            },
         )
         .await
         .unwrap();
@@ -455,16 +467,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn descriptions_pass_the_path_and_samples_flag() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_settings_descriptions()
+            .withf(|path, samples| path == "/settings/WEB/server" && *samples)
+            .times(1)
+            .returning(|_, _| Ok(vec![description()]));
+        let (output, _) = rendering(OutputFormat::Text, false);
+
+        route_settings_commands(
+            output,
+            Box::new(api),
+            &SettingsCommand::Descriptions {
+                path: "/settings/WEB/server".into(),
+                samples: true,
+                long: false,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn descriptions_json_keeps_plugin_list() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_get_settings_descriptions()
-            .returning(|| Ok(vec![description()]));
+            .returning(|_, _| Ok(vec![description()]));
         let (output, out) = rendering(OutputFormat::Json, false);
 
         route_settings_commands(
             output,
             Box::new(api),
-            &SettingsCommand::Descriptions { long: false },
+            &SettingsCommand::Descriptions {
+                path: String::new(),
+                samples: false,
+                long: false,
+            },
         )
         .await
         .unwrap();
