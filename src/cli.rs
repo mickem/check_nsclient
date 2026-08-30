@@ -195,16 +195,16 @@ pub enum QueriesCommand {
     #[command(trailing_var_arg = true)]
     Execute {
         id: String,
-        /// Arguments to pass to the query (use KEY=VALUE or bare KEY for boolean flags)
-        #[arg(value_name = "KEY=VALUE", value_parser = parse_kv_option)]
+        /// Arguments to pass to the query (use KEY=VALUE, --KEY=VALUE or bare KEY for boolean flags)
+        #[arg(value_name = "KEY=VALUE", value_parser = parse_kv_option, allow_hyphen_values = true)]
         args: Vec<(String, String)>,
     },
     /// Execute a query (Nagios compatible output)
     #[command(trailing_var_arg = true)]
     ExecuteNagios {
         id: String,
-        /// Additional query options (use key=value, values keep order specified)
-        #[arg(value_name = "KEY=VALUE", value_parser = parse_kv_option)]
+        /// Additional query options (use KEY=VALUE or --KEY=VALUE, values keep order specified)
+        #[arg(value_name = "KEY=VALUE", value_parser = parse_kv_option, allow_hyphen_values = true)]
         args: Vec<(String, String)>,
     },
 }
@@ -321,7 +321,176 @@ pub enum AuthCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_kv_option;
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("check_nsclient").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("failed to parse {args:?}: {e}"))
+    }
+
+    fn query_args(cli: &Cli) -> (&str, &[(String, String)]) {
+        match &cli.command {
+            Commands::NSClient(opts) => match &opts.command {
+                NSClientCommands::Queries {
+                    command: QueriesCommand::Execute { id, args },
+                } => (id, args),
+                NSClientCommands::Queries {
+                    command: QueriesCommand::ExecuteNagios { id, args },
+                } => (id, args),
+                _ => panic!("not a query execute command"),
+            },
+            _ => panic!("not an nsclient command"),
+        }
+    }
+
+    #[test]
+    fn execute_accepts_hyphenated_key_value_arguments() {
+        let cli = parse(&[
+            "nsclient",
+            "queries",
+            "execute",
+            "check_cpu",
+            "--warning=load>80",
+            "-c",
+            "time=5m",
+            "show-all",
+        ]);
+        let (id, args) = query_args(&cli);
+        assert_eq!(id, "check_cpu");
+        assert_eq!(
+            args,
+            &[
+                ("warning".to_string(), "load>80".to_string()),
+                ("c".to_string(), String::new()),
+                ("time".to_string(), "5m".to_string()),
+                ("show-all".to_string(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn execute_nagios_accepts_hyphenated_key_value_arguments() {
+        let cli = parse(&[
+            "nsclient",
+            "queries",
+            "execute-nagios",
+            "check_memory",
+            "--critical=used>90%",
+        ]);
+        let (id, args) = query_args(&cli);
+        assert_eq!(id, "check_memory");
+        assert_eq!(args, &[("critical".to_string(), "used>90%".to_string())]);
+    }
+
+    #[test]
+    fn global_options_are_parsed_before_subcommand() {
+        let cli = parse(&[
+            "--output",
+            "json",
+            "--output-long",
+            "-dd",
+            "--wsl",
+            "nsclient",
+            "-p",
+            "prod",
+            "-t",
+            "5",
+            "ping",
+        ]);
+        assert!(matches!(cli.output, OutputFormat::Json));
+        assert!(cli.output_long);
+        assert_eq!(cli.debug, 2);
+        assert!(cli.wsl);
+        match &cli.command {
+            Commands::NSClient(opts) => {
+                assert_eq!(opts.profile.as_deref(), Some("prod"));
+                assert_eq!(opts.timeout_s, 5);
+                assert_eq!(opts.user_agent, "nscp-client");
+                assert!(matches!(opts.command, NSClientCommands::Ping {}));
+            }
+            _ => panic!("not an nsclient command"),
+        }
+    }
+
+    #[test]
+    fn auth_login_defaults() {
+        let cli = parse(&["nsclient", "auth", "login", "--password", "pw"]);
+        match &cli.command {
+            Commands::NSClient(opts) => match &opts.command {
+                NSClientCommands::Auth {
+                    command:
+                        AuthCommand::Login {
+                            id,
+                            url,
+                            username,
+                            password,
+                            insecure,
+                            ca,
+                        },
+                } => {
+                    assert_eq!(id, "default");
+                    assert_eq!(url, "https://localhost:8443");
+                    assert_eq!(username, "admin");
+                    assert_eq!(password, "pw");
+                    assert!(!insecure);
+                    assert!(ca.is_none());
+                }
+                _ => panic!("not a login command"),
+            },
+            _ => panic!("not an nsclient command"),
+        }
+    }
+
+    #[test]
+    fn settings_set_requires_all_parts() {
+        let result = Cli::try_parse_from([
+            "check_nsclient",
+            "nsclient",
+            "settings",
+            "set",
+            "--path",
+            "/settings/default",
+            "--key",
+            "allowed hosts",
+        ]);
+        assert!(result.is_err());
+        let cli = parse(&[
+            "nsclient",
+            "settings",
+            "set",
+            "--path",
+            "/settings/default",
+            "--key",
+            "allowed hosts",
+            "--value",
+            "127.0.0.1",
+        ]);
+        match &cli.command {
+            Commands::NSClient(opts) => match &opts.command {
+                NSClientCommands::Settings {
+                    command: SettingsCommand::Set { path, key, value },
+                } => {
+                    assert_eq!(path, "/settings/default");
+                    assert_eq!(key, "allowed hosts");
+                    assert_eq!(value, "127.0.0.1");
+                }
+                _ => panic!("not a settings set command"),
+            },
+            _ => panic!("not an nsclient command"),
+        }
+    }
+
+    #[test]
+    fn profile_commands_parse() {
+        let cli = parse(&["profile", "set-default", "prod"]);
+        assert!(matches!(
+            cli.command,
+            Commands::Profile {
+                command: ProfileCommands::SetDefault { ref id }
+            } if id == "prod"
+        ));
+        assert!(Cli::try_parse_from(["check_nsclient", "profile", "bogus"]).is_err());
+    }
 
     #[test]
     fn parse_kv_option_supports_key_value_pairs() {
