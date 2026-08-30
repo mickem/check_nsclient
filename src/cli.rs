@@ -213,7 +213,7 @@ pub enum QueriesCommand {
 pub enum LogsCommand {
     /// List log records (paginated)
     List {
-        /// Page number (starts at 0)
+        /// Page number (starts at 1)
         #[arg(long, default_value_t = 1u64)]
         page: u64,
         /// Page size
