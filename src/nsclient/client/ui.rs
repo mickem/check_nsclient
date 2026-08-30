@@ -60,7 +60,7 @@ impl UI<'_> {
                 }
                 self.handle_key_event(key_event).await
             }
-            UIEvent::Status(event) => self.on_error(&event),
+            UIEvent::Status(event) => self.on_status(&event),
             UIEvent::Output(event) => self.output(&event),
             UIEvent::Error(error) => self.on_error(&error),
             UIEvent::Log(log) => self.on_log(log),
@@ -83,6 +83,10 @@ impl UI<'_> {
 
     pub(crate) fn on_error(&mut self, error: &str) {
         self.log.add(LogRecord::from_error(error));
+    }
+
+    pub(crate) fn on_status(&mut self, status: &str) {
+        self.log.add(LogRecord::from_status(status));
     }
 
     fn draw(&mut self, frame: &mut Frame) {

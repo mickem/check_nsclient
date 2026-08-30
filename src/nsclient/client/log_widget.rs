@@ -32,6 +32,12 @@ impl LogRecord {
             message: message.to_string(),
         }
     }
+    pub(crate) fn from_status(message: &str) -> LogRecord {
+        Self {
+            level: LogLevel::Info,
+            message: message.to_string(),
+        }
+    }
 }
 
 pub struct LogWidget {
