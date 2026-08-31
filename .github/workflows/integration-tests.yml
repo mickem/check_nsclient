@@ -1,0 +1,135 @@
+name: Integration tests
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      nscp-version:
+        type: string
+        description: 'NSClient++ release to test against (defaults to .nscp_version)'
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      nscp-version:
+        type: string
+        description: 'NSClient++ release to test against (defaults to .nscp_version)'
+        required: false
+        default: ''
+
+jobs:
+  linux:
+    name: Linux (Docker, .deb) vs NSClient++ ${{ inputs.nscp-version || '(pinned)' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve NSClient++ version
+        id: nscp
+        run: |
+          version="${{ inputs.nscp-version }}"
+          if [ -z "$version" ]; then version="$(tr -d '[:space:]' < .nscp_version)"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Testing against NSClient++ $version"
+
+      - name: Install system dependencies
+        run: |
+          retry() {
+            local n=0
+            until "$@"; do
+              n=$((n+1))
+              if [ $n -ge 3 ]; then echo "::error::Failed after $n attempts: $*" >&2; return 1; fi
+              echo "::warning::Attempt $n failed; retrying in $((n*5))s..." >&2
+              sleep $((n*5))
+            done
+          }
+          retry sudo apt-get update
+          # libdbus/pkg-config: keyring crate build deps; gnome-keyring + dbus: a Secret
+          # Service for the token store on a headless runner.
+          retry sudo apt-get install -y libdbus-1-dev pkg-config gnome-keyring dbus dbus-x11 curl
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-integration-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build check_nsclient and the test binary
+        run: cargo test --test integration --no-run
+
+      - name: Build NSClient++ image
+        run: |
+          docker build \
+            --build-arg "NSCP_VERSION=${{ steps.nscp.outputs.version }}" \
+            --build-arg NSCP_ARCH=amd64 \
+            --build-arg NSCP_PASSWORD=it-password \
+            -t check_nsclient-it tests/integration
+
+      - name: Start NSClient++
+        run: |
+          docker run -d --name nscp -p 8443:8443 check_nsclient-it
+          for i in $(seq 1 60); do
+            code="$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:8443/api/v2/info || true)"
+            if [ "$code" != "000" ] && [ -n "$code" ]; then echo "ready after ${i}s (http $code)"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::NSClient++ did not start"; docker logs nscp; exit 1
+
+      - name: Run integration tests
+        env:
+          CHECK_NSCLIENT_IT_URL: https://127.0.0.1:8443
+          CHECK_NSCLIENT_IT_USERNAME: admin
+          CHECK_NSCLIENT_IT_PASSWORD: it-password
+        run: |
+          # Run inside a private D-Bus session with an unlocked gnome-keyring so the
+          # keyring crate has a Secret Service to talk to.
+          dbus-run-session -- bash -c '
+            set -e
+            echo -n "ci" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+            cargo test --test integration
+          '
+
+      - name: NSClient++ logs
+        if: always()
+        run: docker logs nscp || true
+
+      - name: Stop NSClient++
+        if: always()
+        run: docker rm -f nscp || true
+
+  windows:
+    name: Windows (native, .zip) vs NSClient++ ${{ inputs.nscp-version || '(pinned)' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-integration-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build check_nsclient and the test binary
+        run: cargo test --test integration --no-run
+
+      # Downloads the release zip, enables the REST API, runs `nscp test` in the
+      # background and executes the suite against it (see the script header).
+      - name: Run integration tests
+        shell: pwsh
+        env:
+          NSCP_VERSION: ${{ inputs.nscp-version }}
+        run: tests/integration/run-windows.ps1

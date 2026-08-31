@@ -35,10 +35,38 @@ pub struct LogRecord {
     pub message: String,
 }
 
+/// A log record submitted to the agent.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NewLogRecord {
+    pub level: String,
+    pub message: String,
+    pub file: String,
+    pub line: u64,
+}
+
+/// How many buffered log records the server dropped.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LogClearResult {
+    #[serde(default)]
+    pub count: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LogStatus {
     pub errors: u64,
     pub last_error: Option<String>,
+}
+
+impl LogStatus {
+    pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
+        let mut map = IndexMap::new();
+        map.insert("errors".to_string(), self.errors.to_string());
+        map.insert(
+            "last_error".to_string(),
+            self.last_error.clone().unwrap_or_default(),
+        );
+        map
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Tabled)]
@@ -53,8 +81,10 @@ pub struct ScriptRuntimes {
 
 pub type Metrics = HashMap<String, Value>;
 
-#[derive(Debug, Serialize)]
-#[serde(bound(serialize = "T: Serialize"))]
+/// Agent tags: free-form `name -> value` labels attached to this host.
+pub type Tags = HashMap<String, String>;
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PaginatedResponse<T> {
     pub content: T,
     pub page: u64,
@@ -87,6 +117,43 @@ pub struct SettingsEntry {
     pub key: String,
     pub path: String,
     pub value: String,
+}
+
+/// One configuration change since the last save.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct SettingsDiffEntry {
+    /// added / removed / modified / path_added / path_removed
+    #[tabled()]
+    pub change_type: String,
+    #[tabled()]
+    pub path: String,
+    #[tabled()]
+    pub key: String,
+    #[tabled()]
+    pub old_value: String,
+    #[tabled()]
+    pub new_value: String,
+    /// Values of sensitive keys are redacted to `***` by the server.
+    #[tabled()]
+    #[serde(default)]
+    pub is_sensitive: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SettingsDiff {
+    #[serde(default)]
+    pub entries: Vec<SettingsDiffEntry>,
+    #[serde(default)]
+    pub count: u64,
+}
+
+/// What the server removed in response to a settings DELETE.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SettingsDeleteResult {
+    pub status: String,
+    pub keys: u64,
+    #[serde(default)]
+    pub recursive: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -150,7 +217,7 @@ pub struct FlatSettingsDescription {
     pub is_sample_key: bool,
     #[tabled()]
     pub is_template_key: bool,
-    #[tabled()]
+    #[tabled(rename = "type")]
     #[serde(rename = "type")]
     pub value_type: String,
     #[tabled()]
@@ -177,6 +244,9 @@ pub struct SettingsCommandRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginResponse {
     pub key: String,
+    /// The user the credentials belong to. Older servers omit it.
+    #[serde(default)]
+    pub user: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Tabled)]
@@ -275,6 +345,101 @@ pub struct ListQueriesResult {
     pub plugin: String,
 }
 
+/// One metadata resource advertised by `/api/v2/metadata`.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct MetadataResource {
+    #[tabled()]
+    pub name: String,
+    #[tabled()]
+    pub title: String,
+    #[tabled()]
+    pub url: String,
+}
+
+/// A submission channel and the modules listening on it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetadataChannel {
+    pub name: String,
+    #[serde(default)]
+    pub plugins: Vec<String>,
+}
+
+impl MetadataChannel {
+    pub fn to_flat(&self) -> FlatMetadataChannel {
+        FlatMetadataChannel {
+            name: self.name.clone(),
+            plugins: self.plugins.join(", "),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct FlatMetadataChannel {
+    #[tabled()]
+    pub name: String,
+    #[tabled()]
+    pub plugins: String,
+}
+
+/// One entry from the event store (event log hits, real-time filter matches, ...).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub index: i64,
+    pub event: String,
+    pub date: String,
+    #[serde(default)]
+    pub data: HashMap<String, String>,
+}
+
+impl EventRecord {
+    pub fn to_flat(&self) -> FlatEventRecord {
+        let mut data: Vec<String> = self
+            .data
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        data.sort();
+        FlatEventRecord {
+            index: self.index,
+            date: self.date.clone(),
+            event: self.event.clone(),
+            data: data.join(", "),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct FlatEventRecord {
+    #[tabled()]
+    pub index: i64,
+    #[tabled()]
+    pub date: String,
+    #[tabled()]
+    pub event: String,
+    #[tabled()]
+    pub data: String,
+}
+
+/// A query alias: an admin defined wrapper around a real check command.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct AliasResult {
+    #[tabled()]
+    pub name: String,
+    #[tabled()]
+    pub title: String,
+    #[tabled()]
+    pub description: String,
+    #[tabled()]
+    pub plugin: String,
+    /// Aliases are executed through the regular queries endpoint.
+    #[tabled(skip)]
+    #[serde(default)]
+    pub query_url: String,
+    #[tabled(skip)]
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Tabled)]
 pub struct QueryResult {
     #[tabled()]
@@ -323,16 +488,35 @@ pub struct ExecuteResult {
     pub result: i32,
 }
 impl ExecuteResult {
+    /// Flatten the result into an ordered key/value list for table/csv output.
+    ///
+    /// A single line is rendered as `output` plus one entry per performance counter.
+    /// Multiple lines are numbered (`output 1`, `output 2`, ...) and performance counters
+    /// that repeat across lines get a `(line N)` suffix so nothing is overwritten.
     pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
         let mut map = IndexMap::new();
         map.insert("command".to_string(), self.command.clone());
-        for line in &self.lines {
-            map.insert("output".to_owned(), clean_up_line(&line.message));
-            for (key, perf) in &line.perf {
-                map.insert(key.clone(), perf_to_simple_string(perf));
+        let multi_line = self.lines.len() > 1;
+        for (index, line) in self.lines.iter().enumerate() {
+            let line_no = index + 1;
+            let output_key = if multi_line {
+                format!("output {line_no}")
+            } else {
+                "output".to_string()
+            };
+            map.insert(output_key, clean_up_line(&line.message));
+            let mut perf: Vec<_> = line.perf.iter().collect();
+            perf.sort_by(|a, b| a.0.cmp(b.0));
+            for (key, perf) in perf {
+                let key = if map.contains_key(key) {
+                    format!("{key} (line {line_no})")
+                } else {
+                    key.clone()
+                };
+                map.insert(key, perf_to_simple_string(perf));
             }
         }
-        map.insert("result".to_string(), result_to_string(&self.result));
+        map.insert("result".to_string(), result_to_string(self.result));
         map
     }
 }
@@ -360,12 +544,11 @@ fn clean_up_line(line: &str) -> String {
     result
 }
 
-fn result_to_string(result: &i32) -> String {
+fn result_to_string(result: i32) -> String {
     match result {
         0 => "OK".to_string(),
         1 => "WARNING".to_string(),
         2 => "CRITICAL".to_string(),
-        3 => "UNKNOWN".to_string(),
         _ => "UNKNOWN".to_string(),
     }
 }
@@ -407,11 +590,20 @@ pub struct ExecuteNagiosLine {
 }
 
 impl ExecuteNagiosLine {
+    /// Human friendly rendering (used by the interactive client).
     pub(crate) fn render(&self) -> String {
         if self.perf.is_empty() {
             return self.message.clone();
         }
         format!("{} | {}", self.message, self.perf)
+    }
+
+    /// Nagios plugin output format: `message|perfdata`.
+    pub(crate) fn render_nagios(&self) -> String {
+        if self.perf.is_empty() {
+            return self.message.clone();
+        }
+        format!("{}|{}", self.message, self.perf)
     }
 }
 
@@ -442,5 +634,209 @@ impl ExecuteNagiosResult {
             "UNKNOWN" | "3" => 3,
             _ => 3,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn perf(value: Option<f64>, unit: Option<&str>) -> PerfData {
+        PerfData {
+            value,
+            unit: unit.map(str::to_string),
+            warning: None,
+            critical: None,
+            minimum: None,
+            maximum: None,
+        }
+    }
+
+    #[test]
+    fn clean_up_line_expands_tabs_to_next_tab_stop() {
+        assert_eq!(clean_up_line("a\tb"), "a       b");
+        assert_eq!(clean_up_line("abcdefgh\tb"), "abcdefgh        b");
+        assert_eq!(clean_up_line("ab\ncd\te"), "ab\ncd      e");
+        assert_eq!(clean_up_line("plain"), "plain");
+    }
+
+    #[test]
+    fn result_to_string_maps_nagios_codes() {
+        assert_eq!(result_to_string(0), "OK");
+        assert_eq!(result_to_string(1), "WARNING");
+        assert_eq!(result_to_string(2), "CRITICAL");
+        assert_eq!(result_to_string(3), "UNKNOWN");
+        assert_eq!(result_to_string(42), "UNKNOWN");
+        assert_eq!(result_to_string(-1), "UNKNOWN");
+    }
+
+    #[test]
+    fn perf_to_simple_string_includes_only_present_fields() {
+        assert_eq!(perf_to_simple_string(&perf(None, None)), "");
+        assert_eq!(perf_to_simple_string(&perf(Some(3.5), None)), "3.5");
+        assert_eq!(perf_to_simple_string(&perf(Some(3.0), Some("%"))), "3%");
+        let full = PerfData {
+            value: Some(10.0),
+            unit: Some("MB".into()),
+            warning: Some(80.0),
+            critical: Some(90.0),
+            minimum: Some(0.0),
+            maximum: Some(100.0),
+        };
+        assert_eq!(
+            perf_to_simple_string(&full),
+            "10MB, warning: 80, critical: 90, minimum: 0, maximum: 100"
+        );
+    }
+
+    #[test]
+    fn execute_result_to_dict_single_line() {
+        let result = ExecuteResult {
+            command: "check_cpu".into(),
+            lines: vec![ExecuteLine {
+                message: "OK".into(),
+                perf: HashMap::from([
+                    ("b".to_string(), perf(Some(2.0), None)),
+                    ("a".to_string(), perf(Some(1.0), None)),
+                ]),
+            }],
+            result: 0,
+        };
+        let dict = result.to_dict();
+        let keys: Vec<&str> = dict.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["command", "output", "a", "b", "result"]);
+        assert_eq!(dict["output"], "OK");
+        assert_eq!(dict["result"], "OK");
+    }
+
+    #[test]
+    fn execute_result_to_dict_keeps_every_line_and_counter() {
+        let result = ExecuteResult {
+            command: "check_drivesize".into(),
+            lines: vec![
+                ExecuteLine {
+                    message: "C: ok".into(),
+                    perf: HashMap::from([("used".to_string(), perf(Some(1.0), Some("GB")))]),
+                },
+                ExecuteLine {
+                    message: "D: ok".into(),
+                    perf: HashMap::from([("used".to_string(), perf(Some(2.0), Some("GB")))]),
+                },
+            ],
+            result: 1,
+        };
+        let dict = result.to_dict();
+        let keys: Vec<&str> = dict.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "command",
+                "output 1",
+                "used",
+                "output 2",
+                "used (line 2)",
+                "result"
+            ]
+        );
+        assert_eq!(dict["output 1"], "C: ok");
+        assert_eq!(dict["output 2"], "D: ok");
+        assert_eq!(dict["used"], "1GB");
+        assert_eq!(dict["used (line 2)"], "2GB");
+        assert_eq!(dict["result"], "WARNING");
+    }
+
+    #[test]
+    fn nagios_exit_code_accepts_names_and_numbers() {
+        let with = |result: &str| ExecuteNagiosResult {
+            command: "x".into(),
+            lines: vec![],
+            result: result.into(),
+        };
+        assert_eq!(with("OK").get_exit_code(), 0);
+        assert_eq!(with("ok").get_exit_code(), 0);
+        assert_eq!(with("0").get_exit_code(), 0);
+        assert_eq!(with("Warning").get_exit_code(), 1);
+        assert_eq!(with("1").get_exit_code(), 1);
+        assert_eq!(with("CRITICAL").get_exit_code(), 2);
+        assert_eq!(with("2").get_exit_code(), 2);
+        assert_eq!(with("UNKNOWN").get_exit_code(), 3);
+        assert_eq!(with("3").get_exit_code(), 3);
+        assert_eq!(with("garbage").get_exit_code(), 3);
+    }
+
+    #[test]
+    fn nagios_line_rendering() {
+        let line = ExecuteNagiosLine {
+            message: "OK: fine".into(),
+            perf: "'load'=1;2;3".into(),
+        };
+        assert_eq!(line.render(), "OK: fine | 'load'=1;2;3");
+        assert_eq!(line.render_nagios(), "OK: fine|'load'=1;2;3");
+
+        let no_perf = ExecuteNagiosLine {
+            message: "OK: fine".into(),
+            perf: String::new(),
+        };
+        assert_eq!(no_perf.render(), "OK: fine");
+        assert_eq!(no_perf.render_nagios(), "OK: fine");
+    }
+
+    #[test]
+    fn nagios_result_to_dict_serializes_lines_as_json() {
+        let result = ExecuteNagiosResult {
+            command: "check".into(),
+            lines: vec![ExecuteNagiosLine {
+                message: "m".into(),
+                perf: "p".into(),
+            }],
+            result: "OK".into(),
+        };
+        let dict = result.to_dict();
+        assert_eq!(dict["command"], "check");
+        assert_eq!(dict["lines"], r#"[{"message":"m","perf":"p"}]"#);
+        assert_eq!(dict["result"], "OK");
+    }
+
+    #[test]
+    fn log_status_to_dict_renders_missing_error_as_empty() {
+        let status = LogStatus {
+            errors: 3,
+            last_error: None,
+        };
+        let dict = status.to_dict();
+        assert_eq!(dict["errors"], "3");
+        assert_eq!(dict["last_error"], "");
+    }
+
+    #[test]
+    fn settings_command_action_serializes_lowercase() {
+        let request = SettingsCommandRequest {
+            command: SettingsCommandAction::Reload,
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"command":"reload"}"#
+        );
+    }
+
+    #[test]
+    fn settings_description_to_flat_joins_plugins() {
+        let description = SettingsDescription {
+            default_value: "d".into(),
+            description: "desc".into(),
+            icon: "i".into(),
+            is_advanced_key: false,
+            is_object: false,
+            is_sample_key: false,
+            is_template_key: false,
+            key: "k".into(),
+            path: "/p".into(),
+            value_type: "string".into(),
+            plugins: vec!["A".into(), "B".into()],
+            sample_usage: "s".into(),
+            title: "t".into(),
+            value: "v".into(),
+        };
+        assert_eq!(description.to_flat().plugins, "A, B");
     }
 }

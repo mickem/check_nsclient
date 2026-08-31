@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod constants;
+mod debug;
 mod nsclient;
 mod profile;
 mod rendering;
@@ -16,10 +17,8 @@ use clap::Parser;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Handle global flags (like debug)
-    if cli.debug > 0 {
-        println!("Debug mode enabled (level {})", cli.debug);
-    }
+    debug::set_level(cli.debug);
+    debug::log(1, format!("Debug output enabled (level {})", cli.debug));
     if cli.wsl {
         tokens::enable_wsl_workaround();
     }
@@ -29,11 +28,14 @@ async fn main() -> anyhow::Result<()> {
         Commands::NSClient(args) => {
             let output_sink = Box::new(PrintRender::new());
 
-            route_ns_client(
+            let exit_code = route_ns_client(
                 Rendering::new(cli.output, cli.output_style, cli.output_long, output_sink),
                 args,
             )
-            .await?
+            .await?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         Commands::Version {} => {
             println!("Version: {}", env!("CARGO_PKG_VERSION"));

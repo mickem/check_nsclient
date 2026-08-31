@@ -3,7 +3,7 @@ use crate::nsclient::client::command_input::{CommandInput, CommandType};
 use crate::nsclient::client::events::{UICommand, UIEvent};
 use crate::nsclient::client::log_widget::{LogRecord, LogWidget};
 use crate::nsclient::client::status_widget::StatusWidget;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc;
@@ -54,13 +54,17 @@ impl UI<'_> {
     async fn handle_ui_event(&mut self, event: UIEvent) {
         match event {
             UIEvent::Key(key_event) => {
+                // Windows reports both press and release; only act on the press.
+                if key_event.kind == KeyEventKind::Release {
+                    return;
+                }
                 if key_event.code == KeyCode::Esc {
                     self.exit();
                     return;
                 }
                 self.handle_key_event(key_event).await
             }
-            UIEvent::Status(event) => self.on_error(&event),
+            UIEvent::Status(event) => self.on_status(&event),
             UIEvent::Output(event) => self.output(&event),
             UIEvent::Error(error) => self.on_error(&error),
             UIEvent::Log(log) => self.on_log(log),
@@ -83,6 +87,10 @@ impl UI<'_> {
 
     pub(crate) fn on_error(&mut self, error: &str) {
         self.log.add(LogRecord::from_error(error));
+    }
+
+    pub(crate) fn on_status(&mut self, status: &str) {
+        self.log.add(LogRecord::from_status(status));
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -148,8 +156,8 @@ impl UI<'_> {
                     }
                 }
             },
-            Err(_) => {
-                self.on_error("Invalid command");
+            Err(e) => {
+                self.on_error(&format!("Invalid command: {e:#}"));
             }
         };
     }

@@ -1,30 +1,55 @@
+mod alias_commands;
 mod api;
 mod auth_commands;
 pub mod client;
+mod event_commands;
 mod generic_commands;
 mod login_helper;
 mod logs_commands;
 mod messages;
+mod metadata_commands;
 mod metrics_commands;
 mod module_commands;
 mod query_commands;
 mod scripts_commands;
 mod settings_commands;
+mod tag_commands;
 
 use crate::cli::{NSClientCommandOptions, NSClientCommands};
 use crate::config;
+use crate::nsclient::alias_commands::route_alias_commands;
 use crate::nsclient::api::{ApiClient, ApiClientApi, Auth};
 use crate::nsclient::auth_commands::route_auth_commands;
+use crate::nsclient::event_commands::route_event_commands;
 use crate::nsclient::generic_commands::{handle_ping_command, handle_version_command};
 use crate::nsclient::logs_commands::route_log_commands;
+use crate::nsclient::metadata_commands::route_metadata_commands;
 use crate::nsclient::metrics_commands::route_metrics_commands;
 use crate::nsclient::module_commands::route_module_commands;
 use crate::nsclient::query_commands::route_query_commands;
 use crate::nsclient::scripts_commands::route_script_commands;
 use crate::nsclient::settings_commands::route_settings_commands;
+use crate::nsclient::tag_commands::route_tag_commands;
 use crate::rendering::Rendering;
 use reqwest::Certificate;
 use std::time::Duration;
+
+/// HTTP client settings shared by every request made on behalf of one CLI invocation,
+/// including the login performed when a token has to be refreshed.
+#[derive(Clone, Debug)]
+pub struct ConnectionOptions {
+    pub timeout_s: u64,
+    pub user_agent: String,
+}
+
+impl ConnectionOptions {
+    pub fn from_args(args: &NSClientCommandOptions) -> Self {
+        Self {
+            timeout_s: args.timeout_s,
+            user_agent: args.user_agent.clone(),
+        }
+    }
+}
 
 fn preprocess_url(url: &str) -> String {
     let url = url.trim_end_matches('/');
@@ -34,34 +59,45 @@ fn preprocess_url(url: &str) -> String {
 pub fn build_client_from_profile(
     args: &NSClientCommandOptions,
 ) -> anyhow::Result<Box<dyn ApiClientApi>> {
-    let profile = match args.profile.as_ref() {
+    let profile = resolve_profile(args.profile.as_deref())?;
+    build_client_for_profile(&profile, &ConnectionOptions::from_args(args))
+}
+
+/// Look up `id`, or the default profile when no id is given.
+pub fn resolve_profile(id: Option<&str>) -> anyhow::Result<config::NSClientProfile> {
+    match id {
         Some(profile_id) => match config::get_nsclient_profile(profile_id)? {
-            Some(profile) => profile,
+            Some(profile) => Ok(profile),
             None => anyhow::bail!("NSClient++ profile '{}' not found.", profile_id),
         },
         None => match config::get_default_nsclient_profile()? {
-            Some(profile) => profile,
+            Some(profile) => Ok(profile),
             None => anyhow::bail!(
                 "No default NSClient++ profile set. Please specify a profile using --profile or set a default profile."
             ),
         },
-    };
+    }
+}
+
+/// Build a client that authenticates with the stored API key of `profile`.
+pub fn build_client_for_profile(
+    profile: &config::NSClientProfile,
+    options: &ConnectionOptions,
+) -> anyhow::Result<Box<dyn ApiClientApi>> {
     let api_key = config::get_api_key(&profile.id)?;
     build_client(
         &profile.url,
-        args.timeout_s,
-        &args.user_agent,
+        options,
         Auth::Token(api_key),
         profile.insecure,
         Some(profile.id.to_owned()),
-        profile.ca,
+        profile.ca.clone(),
     )
 }
 
 pub fn build_client(
     url: &str,
-    timeout_s: u64,
-    user_agent: &str,
+    options: &ConnectionOptions,
     auth: Auth,
     insecure: bool,
     profile_id: Option<String>,
@@ -69,51 +105,66 @@ pub fn build_client(
 ) -> anyhow::Result<Box<dyn ApiClientApi>> {
     let url = preprocess_url(url);
     let mut client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_s))
-        .user_agent(user_agent)
+        .timeout(Duration::from_secs(options.timeout_s))
+        .user_agent(&options.user_agent)
         .danger_accept_invalid_certs(insecure);
     if let Some(ca_file) = ca_file {
         let ca_pem = std::fs::read(&ca_file)?;
         let cert = Certificate::from_pem(&ca_pem)?;
         client = client.tls_certs_merge(vec![cert]);
     }
-    let client = ApiClient::new(client, &url, auth, profile_id)?;
+    let client = ApiClient::new(client, &url, auth, profile_id, options.clone())?;
     Ok(Box::new(client))
 }
 
+/// Route an `nsclient` sub command and return the process exit code.
 pub async fn route_ns_client(
     output: Rendering,
     args: &NSClientCommandOptions,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     match &args.command {
         NSClientCommands::Ping {} => {
-            handle_ping_command(output, build_client_from_profile(args)?).await
+            handle_ping_command(output, build_client_from_profile(args)?).await?
         }
         NSClientCommands::Version {} => {
-            handle_version_command(output, build_client_from_profile(args)?).await
+            handle_version_command(output, build_client_from_profile(args)?).await?
         }
         NSClientCommands::Modules { command } => {
-            route_module_commands(output, build_client_from_profile(args)?, command).await
+            route_module_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Queries { command } => {
-            route_query_commands(output, build_client_from_profile(args)?, command).await
+            return route_query_commands(output, build_client_from_profile(args)?, command).await;
+        }
+        NSClientCommands::Aliases { command } => {
+            route_alias_commands(output, build_client_from_profile(args)?, command).await?
+        }
+        NSClientCommands::Events { command } => {
+            route_event_commands(output, build_client_from_profile(args)?, command).await?
+        }
+        NSClientCommands::Tags { command } => {
+            route_tag_commands(output, build_client_from_profile(args)?, command).await?
+        }
+        NSClientCommands::Metadata { command } => {
+            route_metadata_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Logs { command } => {
-            route_log_commands(output, build_client_from_profile(args)?, command).await
+            route_log_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Scripts { command } => {
-            route_script_commands(output, build_client_from_profile(args)?, command).await
+            route_script_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Settings { command } => {
-            route_settings_commands(output, build_client_from_profile(args)?, command).await
+            route_settings_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Metrics { command } => {
-            route_metrics_commands(output, build_client_from_profile(args)?, command).await
+            route_metrics_commands(output, build_client_from_profile(args)?, command).await?
         }
-        NSClientCommands::Auth { command } => route_auth_commands(output, command).await,
-        NSClientCommands::Client {} => client::run_client(build_client_from_profile(args)?).await,
-        NSClientCommands::Test {} => client::run_client(build_client_from_profile(args)?).await,
+        NSClientCommands::Auth { command } => route_auth_commands(output, args, command).await?,
+        NSClientCommands::Client {} | NSClientCommands::Test {} => {
+            client::run_client(build_client_from_profile(args)?).await?
+        }
     }
+    Ok(0)
 }
 #[cfg(test)]
 mod tests {
@@ -124,6 +175,90 @@ mod tests {
     use crate::rendering::StringRender;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn options(profile: Option<&str>, command: NSClientCommands) -> NSClientCommandOptions {
+        NSClientCommandOptions {
+            command,
+            timeout_s: 30,
+            user_agent: "nscp-client".to_owned(),
+            profile: profile.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn preprocess_url_ensures_single_trailing_slash() {
+        assert_eq!(preprocess_url("https://host:8443"), "https://host:8443/");
+        assert_eq!(preprocess_url("https://host:8443/"), "https://host:8443/");
+        assert_eq!(preprocess_url("https://host:8443///"), "https://host:8443/");
+    }
+
+    #[test]
+    fn connection_options_come_from_cli_args() {
+        let args = NSClientCommandOptions {
+            command: NSClientCommands::Ping {},
+            timeout_s: 7,
+            user_agent: "custom-agent".into(),
+            profile: None,
+        };
+        let options = ConnectionOptions::from_args(&args);
+        assert_eq!(options.timeout_s, 7);
+        assert_eq!(options.user_agent, "custom-agent");
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_reports_unknown_profile() {
+        let tmp = mock_test_config();
+        let err = build_client_from_profile(&options(Some("nope"), NSClientCommands::Ping {}))
+            .err()
+            .expect("unknown profile must fail");
+        assert_eq!(err.to_string(), "NSClient++ profile 'nope' not found.");
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_reports_missing_default() {
+        let tmp = mock_test_config();
+        let err = build_client_from_profile(&options(None, NSClientCommands::Ping {}))
+            .err()
+            .expect("missing default must fail");
+        assert!(
+            err.to_string()
+                .starts_with("No default NSClient++ profile set"),
+            "{err}"
+        );
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_uses_default_profile() {
+        let tmp = mock_test_config();
+        add_nsclient_profile("dflt", "http://localhost:1", false, "u", "p", "k", None).unwrap();
+        assert!(build_client_from_profile(&options(None, NSClientCommands::Ping {})).is_ok());
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn build_client_from_profile_reports_missing_ca_file() {
+        let tmp = mock_test_config();
+        add_nsclient_profile(
+            "ca",
+            "http://localhost:1",
+            false,
+            "u",
+            "p",
+            "k",
+            Some("/definitely/not/here.pem".into()),
+        )
+        .unwrap();
+        assert!(
+            build_client_from_profile(&options(Some("ca"), NSClientCommands::Ping {})).is_err()
+        );
+        drop(tmp);
+    }
 
     #[tokio::test]
     #[serial_test::serial(config)]
