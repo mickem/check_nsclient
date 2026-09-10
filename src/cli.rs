@@ -126,6 +126,11 @@ pub enum NSClientCommands {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Poll the passive result cache (and feed it into Nagios)
+    Results {
+        #[command(subcommand)]
+        command: ResultsCommand,
+    },
     /// Legacy command (same as client)
     Test {},
     /// Connect to and interact with NSClient
@@ -159,6 +164,8 @@ pub enum ProfileCommands {
     Remove { id: String },
 }
 
+// Parsed once per process, so the size of the largest sub command does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
     /// Communicate with NSClient
@@ -434,6 +441,93 @@ pub enum MetricsCommand {
     Show {},
     /// Dump metrics in the OpenMetrics/Prometheus text exposition format
     Openmetrics {},
+}
+
+/// Server side filter for the result cache (all optional, combined with AND).
+#[derive(Args, Clone, Debug, Default)]
+pub struct ResultFilterArgs {
+    /// Only results that arrived on this channel
+    #[arg(long)]
+    pub channel: Option<String>,
+    /// Only results submitted by this host (as the agent named it)
+    #[arg(long)]
+    pub host: Option<String>,
+    /// Only results for this command
+    #[arg(long)]
+    pub command: Option<String>,
+    /// Only results submitted under this alias
+    #[arg(long)]
+    pub alias: Option<String>,
+    /// Comma-separated list of ok, warning, critical, unknown (or 0-3)
+    #[arg(long)]
+    pub status: Option<String>,
+}
+
+/// Where `results feed` delivers the passive results.
+#[derive(Args, Clone, Debug, Default)]
+#[group(required = true, multiple = false)]
+pub struct FeedTargetArgs {
+    /// Append PROCESS_SERVICE_CHECK_RESULT lines to the Nagios command file
+    /// (e.g. /usr/local/nagios/var/rw/nagios.cmd)
+    #[arg(long, value_name = "FILE")]
+    pub command_file: Option<String>,
+    /// Drop a check result file into the Nagios check_result_path spool directory
+    /// (e.g. /usr/local/nagios/var/spool/checkresults)
+    #[arg(long, value_name = "DIR")]
+    pub spool_dir: Option<String>,
+    /// Print the PROCESS_SERVICE_CHECK_RESULT lines instead of delivering them
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Subcommand)]
+pub enum ResultsCommand {
+    /// List (and, unless the server has `clear on poll = false`, drain) cached results
+    List {
+        #[command(flatten)]
+        filter: ResultFilterArgs,
+        /// Show all information (same as --output-long)
+        #[arg(short, long)]
+        long: bool,
+    },
+    /// Show one cached result (never drains it)
+    Show {
+        /// The cache key, e.g. srv1/check_cpu
+        key: String,
+    },
+    /// Drop one cached result
+    Delete {
+        /// The cache key, e.g. srv1/check_cpu
+        key: String,
+    },
+    /// Empty the result cache
+    Clear {},
+    /// Poll the cache and submit every result to Nagios as a passive check.
+    ///
+    /// Runs as a single active check: each cached result becomes one
+    /// PROCESS_SERVICE_CHECK_RESULT for the service named by --service, the
+    /// plugin output summarises what was fed and the exit code is OK unless
+    /// the feed itself failed (or --worst is given).
+    Feed {
+        #[command(flatten)]
+        target: FeedTargetArgs,
+        #[command(flatten)]
+        filter: ResultFilterArgs,
+        /// Nagios host_name to submit the results under (default: the host
+        /// the agent reported, pass $HOSTNAME$ from the Nagios command)
+        #[arg(long, value_name = "HOST")]
+        nagios_host: Option<String>,
+        /// Service description template; variables: ${alias-or-command},
+        /// ${alias}, ${command}, ${host}, ${source}, ${channel}, ${key}
+        #[arg(long, default_value = "${alias-or-command}", value_name = "TEMPLATE")]
+        service: String,
+        /// Submit results older than this many seconds as UNKNOWN (0 = never)
+        #[arg(long, default_value_t = 0, value_name = "SECONDS")]
+        max_age: i64,
+        /// Exit with the worst state of the fed results instead of OK
+        #[arg(long)]
+        worst: bool,
+    },
 }
 
 #[derive(Subcommand)]

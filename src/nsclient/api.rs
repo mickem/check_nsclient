@@ -3,11 +3,12 @@ use crate::debug;
 use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
-    AliasResult, EventRecord, ExecuteNagiosResult, ExecuteResult, ListModulesResult,
+    AliasResult, CachedResult, EventRecord, ExecuteNagiosResult, ExecuteResult, ListModulesResult,
     ListQueriesResult, LogClearResult, LogRecord, LogStatus, LoginResponse, MetadataChannel,
     MetadataResource, Metrics, ModulesResult, NewLogRecord, PaginatedResponse, PingResult,
-    QueryResult, ScriptRuntimes, SettingsCommandAction, SettingsCommandRequest,
-    SettingsDeleteResult, SettingsDescription, SettingsDiff, SettingsEntry, SettingsStatus, Tags,
+    QueryResult, ResultFilter, ResultsRemoved, ScriptRuntimes, SettingsCommandAction,
+    SettingsCommandRequest, SettingsDeleteResult, SettingsDescription, SettingsDiff, SettingsEntry,
+    SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -330,6 +331,15 @@ pub trait ApiClientApi: Send + Sync {
     async fn get_metrics(&self) -> anyhow::Result<Metrics>;
     /// Metrics in the OpenMetrics/Prometheus text exposition format.
     async fn get_openmetrics(&self) -> anyhow::Result<String>;
+    /// The passive result cache, optionally filtered. With the server's default
+    /// `clear on poll = true` this *drains* the results it returns.
+    async fn list_results(&self, filter: &ResultFilter) -> anyhow::Result<Vec<CachedResult>>;
+    /// One cached result by key (a lookup: never drains).
+    async fn get_result(&self, key: &str) -> anyhow::Result<CachedResult>;
+    /// Drop one cached result.
+    async fn delete_result(&self, key: &str) -> anyhow::Result<ResultsRemoved>;
+    /// Empty the result cache.
+    async fn clear_results(&self) -> anyhow::Result<ResultsRemoved>;
 }
 
 #[async_trait::async_trait]
@@ -573,6 +583,30 @@ impl ApiClientApi for ApiClient {
     async fn get_openmetrics(&self) -> anyhow::Result<String> {
         self.get_text("api/v2/openmetrics").await
     }
+
+    async fn list_results(&self, filter: &ResultFilter) -> anyhow::Result<Vec<CachedResult>> {
+        self.get_with_query("api/v2/results", &filter.to_query())
+            .await
+    }
+
+    async fn get_result(&self, key: &str) -> anyhow::Result<CachedResult> {
+        // Keys contain `/` by default (`${host}/${alias-or-command}`) and the
+        // server matches the rest of the path verbatim, so the key is not
+        // percent-encoded.
+        self.get_json(&format!("api/v2/results/{key}")).await
+    }
+
+    async fn delete_result(&self, key: &str) -> anyhow::Result<ResultsRemoved> {
+        let path = format!("api/v2/results/{key}");
+        let response = self.send(Method::DELETE, &path, |b| b).await?;
+        Self::parse_json(response, &path).await
+    }
+
+    async fn clear_results(&self) -> anyhow::Result<ResultsRemoved> {
+        let path = "api/v2/results";
+        let response = self.send(Method::DELETE, path, |b| b).await?;
+        Self::parse_json(response, path).await
+    }
 }
 
 #[cfg(test)]
@@ -639,6 +673,10 @@ pub mod mocks {
             async fn get_tags(&self) -> anyhow::Result<Tags>;
             async fn get_metrics(&self) -> anyhow::Result<Metrics>;
             async fn get_openmetrics(&self) -> anyhow::Result<String>;
+            async fn list_results(&self, filter: &ResultFilter) -> anyhow::Result<Vec<CachedResult>>;
+            async fn get_result(&self, key: &str) -> anyhow::Result<CachedResult>;
+            async fn delete_result(&self, key: &str) -> anyhow::Result<ResultsRemoved>;
+            async fn clear_results(&self) -> anyhow::Result<ResultsRemoved>;
         }
     }
 }
@@ -906,6 +944,120 @@ mod tests {
         let err = api.ping().await.unwrap_err().to_string();
         assert!(err.contains("even after refreshing"), "{err}");
         drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn list_results_sends_only_the_set_filters() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/results"))
+            .and(query_param("host", "srv1"))
+            .and(query_param("status", "warning,critical"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "key": "srv1/check_cpu",
+                    "host": "srv1",
+                    "command": "check_cpu",
+                    "status": 2,
+                    "result": "CRITICAL",
+                    "message": "CRITICAL: load 99%",
+                    "perf": "'load'=99%;80;90",
+                    "result_seen": 1757145900,
+                    "age": 5
+                }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let filter = ResultFilter {
+            host: Some("srv1".into()),
+            status: Some("warning,critical".into()),
+            ..Default::default()
+        };
+        let results = api.list_results(&filter).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "srv1/check_cpu");
+        assert_eq!(results[0].status, 2);
+        assert_eq!(
+            results[0].nagios_output(),
+            "CRITICAL: load 99%|'load'=99%;80;90"
+        );
+        // Verified by the mock's `expect(1)` and the query matchers: unset
+        // filters must not travel as empty parameters.
+        let received = server.received_requests().await.unwrap();
+        assert!(!received[0].url.query().unwrap_or("").contains("channel="));
+    }
+
+    #[tokio::test]
+    async fn get_result_keeps_the_slash_in_the_key() {
+        let server = MockServer::start().await;
+        // The slash must stay a path separator (the server matches the rest of
+        // the path verbatim); other characters are percent-encoded as usual.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/results/srv1/Disk%20C"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "key": "srv1/Disk C",
+                "alias": "Disk C",
+                "status": 0
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let result = api.get_result("srv1/Disk C").await.unwrap();
+        assert_eq!(result.alias_or_command(), "Disk C");
+    }
+
+    #[tokio::test]
+    async fn delete_and_clear_results_return_the_removed_count() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/results/srv1/check_cpu"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"removed": 1})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/results"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"removed": 12})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(
+            api.delete_result("srv1/check_cpu").await.unwrap().removed,
+            1
+        );
+        assert_eq!(api.clear_results().await.unwrap().removed, 12);
+    }
+
+    #[tokio::test]
+    async fn disabled_result_cache_is_reported_with_the_server_hint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/results"))
+            .respond_with(ResponseTemplate::new(503).set_body_string(
+                "Passive result cache is disabled. Set enabled=true under /settings/WEB/server/results to turn it on.",
+            ))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let err = api
+            .list_results(&ResultFilter::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("503"), "{err}");
+        assert!(err.contains("Set enabled=true"), "{err}");
     }
 
     #[tokio::test]
