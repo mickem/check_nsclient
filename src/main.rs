@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod constants;
 mod debug;
+mod nagios;
 mod nsclient;
 mod profile;
 mod rendering;

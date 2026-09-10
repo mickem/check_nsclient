@@ -637,6 +637,261 @@ impl ExecuteNagiosResult {
     }
 }
 
+/// One entry of the WEB server's passive result cache (`/api/v2/results`).
+///
+/// Every field is defaulted so a newer (or older) server that adds or lacks a
+/// field still deserializes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CachedResult {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub index: i64,
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub alias: String,
+    /// Nagios status: 0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN.
+    #[serde(default = "unknown_status")]
+    pub status: i32,
+    #[serde(default)]
+    pub result: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub perf: String,
+    #[serde(default)]
+    pub count: i64,
+    #[serde(default)]
+    pub first_seen: i64,
+    #[serde(default)]
+    pub last_seen: i64,
+    #[serde(default)]
+    pub result_seen: i64,
+    #[serde(default)]
+    pub first_seen_date: String,
+    #[serde(default)]
+    pub last_seen_date: String,
+    #[serde(default)]
+    pub result_seen_date: String,
+    /// Seconds since the key last reported.
+    #[serde(default)]
+    pub age: i64,
+    #[serde(default)]
+    pub result_url: String,
+}
+
+fn unknown_status() -> i32 {
+    3
+}
+
+impl CachedResult {
+    /// The status as a word, from the number (the server's `result` field says
+    /// the same thing, but the number is what the exit code is built from).
+    pub fn status_name(&self) -> String {
+        result_to_string(self.status)
+    }
+
+    /// The `alias` when set, otherwise the `command` (mirrors the server's
+    /// `${alias-or-command}` index variable).
+    pub fn alias_or_command(&self) -> &str {
+        if self.alias.is_empty() {
+            &self.command
+        } else {
+            &self.alias
+        }
+    }
+
+    /// Plugin output in Nagios format: `message|perf`.
+    pub fn nagios_output(&self) -> String {
+        if self.perf.is_empty() {
+            self.message.clone()
+        } else {
+            format!("{}|{}", self.message, self.perf)
+        }
+    }
+
+    pub fn to_flat(&self) -> FlatCachedResult {
+        FlatCachedResult {
+            key: self.key.clone(),
+            result: self.status_name(),
+            age: self.age,
+            message: clean_up_line(&self.message),
+            perf: self.perf.clone(),
+            host: self.host.clone(),
+            command: self.command.clone(),
+            alias: self.alias.clone(),
+            channel: self.channel.clone(),
+            count: self.count,
+            first_seen: self.first_seen_date.clone(),
+            last_seen: self.last_seen_date.clone(),
+            result_seen: self.result_seen_date.clone(),
+        }
+    }
+
+    pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
+        let mut map = IndexMap::new();
+        map.insert("key".to_string(), self.key.clone());
+        map.insert("host".to_string(), self.host.clone());
+        map.insert("source".to_string(), self.source.clone());
+        map.insert("channel".to_string(), self.channel.clone());
+        map.insert("command".to_string(), self.command.clone());
+        map.insert("alias".to_string(), self.alias.clone());
+        map.insert("result".to_string(), self.status_name());
+        map.insert("message".to_string(), clean_up_line(&self.message));
+        map.insert("perf".to_string(), self.perf.clone());
+        map.insert("count".to_string(), self.count.to_string());
+        map.insert("age".to_string(), self.age.to_string());
+        map.insert("first seen".to_string(), self.first_seen_date.clone());
+        map.insert("last seen".to_string(), self.last_seen_date.clone());
+        map.insert("result seen".to_string(), self.result_seen_date.clone());
+        map
+    }
+}
+
+/// Table row for a cached result (see [`CachedResult::to_flat`]).
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct FlatCachedResult {
+    #[tabled()]
+    pub key: String,
+    #[tabled()]
+    pub result: String,
+    #[tabled()]
+    pub age: i64,
+    #[tabled()]
+    pub message: String,
+    #[tabled()]
+    pub perf: String,
+    #[tabled()]
+    pub host: String,
+    #[tabled()]
+    pub command: String,
+    #[tabled()]
+    pub alias: String,
+    #[tabled()]
+    pub channel: String,
+    #[tabled()]
+    pub count: i64,
+    #[tabled(rename = "first seen")]
+    pub first_seen: String,
+    #[tabled(rename = "last seen")]
+    pub last_seen: String,
+    #[tabled(rename = "result seen")]
+    pub result_seen: String,
+}
+
+/// Columns of [`FlatCachedResult`] that are only shown with `--long`.
+pub const CACHED_RESULT_LONG_COLUMNS: &[&str] = &[
+    "perf",
+    "host",
+    "command",
+    "alias",
+    "channel",
+    "count",
+    "first seen",
+    "last seen",
+    "result seen",
+];
+
+/// Server side filter for `GET /api/v2/results`. Empty fields match everything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResultFilter {
+    pub channel: Option<String>,
+    pub host: Option<String>,
+    pub command: Option<String>,
+    pub alias: Option<String>,
+    /// Comma separated list of `ok`, `warning`, `critical`, `unknown` (or `0`-`3`).
+    pub status: Option<String>,
+}
+
+impl ResultFilter {
+    /// The filter as query parameters, only naming the fields that are set.
+    pub fn to_query(&self) -> Vec<(String, String)> {
+        let mut query = Vec::new();
+        for (key, value) in [
+            ("channel", &self.channel),
+            ("host", &self.host),
+            ("command", &self.command),
+            ("alias", &self.alias),
+            ("status", &self.status),
+        ] {
+            if let Some(value) = value
+                && !value.trim().is_empty()
+            {
+                query.push((key.to_string(), value.trim().to_string()));
+            }
+        }
+        query
+    }
+}
+
+/// Response of `DELETE /api/v2/results[/{key}]`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResultsRemoved {
+    pub removed: i64,
+}
+
+impl ResultsRemoved {
+    pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
+        let mut map = IndexMap::new();
+        map.insert("removed".to_string(), self.removed.to_string());
+        map
+    }
+}
+
+#[cfg(test)]
+mod cached_result_tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_the_documented_shape_and_tolerates_missing_fields() {
+        let full: CachedResult = serde_json::from_str(
+            r#"{"key":"srv1/check_drivesize","index":42,"channel":"WEB","host":"srv1",
+                "source":"srv1","command":"check_drivesize","alias":"","status":1,
+                "result":"WARNING","message":"WARNING C: 85%","perf":"'C:'=85%;80;90",
+                "count":17,"first_seen":1757145000,"last_seen":1757145900,
+                "result_seen":1757145900,"first_seen_date":"2026-09-06 10:30:00",
+                "last_seen_date":"2026-09-06 10:45:00","result_seen_date":"2026-09-06 10:45:00",
+                "age":12,"result_url":"https://localhost:8443/api/v2/results/srv1/check_drivesize"}"#,
+        )
+        .unwrap();
+        assert_eq!(full.key, "srv1/check_drivesize");
+        assert_eq!(full.status, 1);
+        assert_eq!(full.status_name(), "WARNING");
+        assert_eq!(full.alias_or_command(), "check_drivesize");
+        assert_eq!(full.nagios_output(), "WARNING C: 85%|'C:'=85%;80;90");
+
+        let sparse: CachedResult = serde_json::from_str(r#"{"key":"k","alias":"Disk C"}"#).unwrap();
+        assert_eq!(sparse.status, 3, "a missing status must not read as OK");
+        assert_eq!(sparse.alias_or_command(), "Disk C");
+        assert_eq!(sparse.nagios_output(), "");
+    }
+
+    #[test]
+    fn filter_only_sends_set_fields() {
+        assert!(ResultFilter::default().to_query().is_empty());
+        let filter = ResultFilter {
+            host: Some(" srv1 ".into()),
+            status: Some("warning,critical".into()),
+            alias: Some("".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            filter.to_query(),
+            vec![
+                ("host".to_string(), "srv1".to_string()),
+                ("status".to_string(), "warning,critical".to_string()),
+            ]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

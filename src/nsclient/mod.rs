@@ -11,6 +11,7 @@ mod metadata_commands;
 mod metrics_commands;
 mod module_commands;
 mod query_commands;
+mod results_commands;
 mod scripts_commands;
 mod settings_commands;
 mod tag_commands;
@@ -27,6 +28,7 @@ use crate::nsclient::metadata_commands::route_metadata_commands;
 use crate::nsclient::metrics_commands::route_metrics_commands;
 use crate::nsclient::module_commands::route_module_commands;
 use crate::nsclient::query_commands::route_query_commands;
+use crate::nsclient::results_commands::route_results_commands;
 use crate::nsclient::scripts_commands::route_script_commands;
 use crate::nsclient::settings_commands::route_settings_commands;
 use crate::nsclient::tag_commands::route_tag_commands;
@@ -160,6 +162,9 @@ pub async fn route_ns_client(
             route_metrics_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Auth { command } => route_auth_commands(output, args, command).await?,
+        NSClientCommands::Results { command } => {
+            return route_results_commands(output, build_client_from_profile(args)?, command).await;
+        }
         NSClientCommands::Client {} | NSClientCommands::Test {} => {
             client::run_client(build_client_from_profile(args)?).await?
         }
