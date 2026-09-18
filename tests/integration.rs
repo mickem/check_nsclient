@@ -772,8 +772,8 @@ fn queries_list_and_show() {
     // registered command with `help-pb` to collect its parameters -- against
     // the pinned 0.18.0, 6.1s where the plain listing takes 0.083s, with the
     // agent refusing connections for 3.7s of it. That is what used to make this
-    // suite fail somewhere different every run. `--all` is still covered
-    // against `modules`, which honours it.
+    // suite fail somewhere different every run. The flag itself is still covered
+    // against `modules` and `scripts`, which honour it.
 
     let shown = client.json(&["queries", "show", "check_ok"]);
     assert_eq!(shown["name"], "check_ok");
