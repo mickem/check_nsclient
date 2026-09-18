@@ -42,6 +42,7 @@ mod tests {
             title: "alias_cpu".into(),
             description: "Alias for: check_cpu".into(),
             plugin: "CheckExternalScripts".into(),
+            experimental: false,
             query_url: "https://localhost:8443/api/v2/queries/alias_cpu/".into(),
             metadata: HashMap::from([("k".to_string(), "v".to_string())]),
         }
@@ -68,9 +69,9 @@ mod tests {
 
         assert_eq!(
             out.borrow().as_str(),
-            "| name      | title     | plugin               |\n\
-             |-----------|-----------|----------------------|\n\
-             | alias_cpu | alias_cpu | CheckExternalScripts |\n"
+            "| name      | title     | plugin               | experimental |\n\
+             |-----------|-----------|----------------------|--------------|\n\
+             | alias_cpu | alias_cpu | CheckExternalScripts |              |\n"
         );
     }
 

@@ -1,6 +1,6 @@
 use crate::cli::QueriesCommand;
 use crate::nsclient::api::ApiClientApi;
-use crate::nsclient::messages::{ExecuteNagiosResult, ExecuteResult, QueryResult};
+use crate::nsclient::messages::{ExecuteNagiosResult, ExecuteResult, QueryHelp, QueryResult};
 use crate::rendering::Rendering;
 
 /// Route a `queries` sub command.
@@ -27,6 +27,26 @@ pub async fn route_query_commands(
             }
             Err(e) => anyhow::bail!("Failed to fetch query {id}: {:#}", e),
         },
+        &QueriesCommand::Describe { id, long } => match api.get_query_help(id).await {
+            Ok(Some(help)) => {
+                render_help(&output, &help, long)?;
+                Ok(0)
+            }
+            // The agent answered, and what it said was "nothing here". It
+            // cannot tell an unknown query from an agent without the endpoint,
+            // but `queries show` answers on both.
+            Ok(None) => anyhow::bail!(
+                concat!(
+                    "Nothing to describe for query {id}: either no such query, ",
+                    "or an agent without the endpoint. `queries show {id}` ",
+                    "works on both."
+                ),
+                id = id
+            ),
+            // A 404 here is ambiguous: the query may not exist, or the agent
+            // may predate the endpoint. `queries show` answers on both.
+            Err(e) => anyhow::bail!("Failed to fetch help for query {id}: {:#}", e),
+        },
         &QueriesCommand::Execute { id, args } => match api.execute_query(id, args).await {
             Ok(result) => {
                 output.render_single(&result, ExecuteResult::to_dict)?;
@@ -52,12 +72,58 @@ pub async fn route_query_commands(
     }
 }
 
+/// Render what a check accepts.
+///
+/// The answer has two halves that do not share a shape -- the options a check
+/// takes and the filter keywords it offers -- so the flat formats get a table
+/// each rather than one table with half its columns empty. json and yaml get
+/// the document as the agent sent it, halves intact.
+///
+/// `long` reveals the full descriptions, which for an option run to several
+/// lines; the table otherwise shows the summary line the interactive prompt
+/// shows.
+fn render_help(output: &Rendering, help: &QueryHelp, long: &bool) -> anyhow::Result<()> {
+    if !output.is_flat() {
+        return output.render_nested_single(help);
+    }
+    // Two tables with different columns cannot share one csv: the second set of
+    // headers would arrive mid-file and every reader would choke on it. Refused
+    // rather than written out wrong, the way the nested renderers refuse text.
+    if !output.is_text() {
+        anyhow::bail!(
+            "csv cannot hold both halves of this answer (the options and the filter keywords              are different shapes); use --output json or --output yaml"
+        );
+    }
+    output.print(&format!("Options for {}:", help.name));
+    output.render_rows(&help.parameters, long, &["details"])?;
+    // An alias declares no keywords of its own -- the list belongs to the
+    // command it stands for, and saying so is the difference between "this
+    // check has none" and "look at that one instead".
+    let source = if help.keyword_source.is_empty() || help.keyword_source == help.name {
+        String::new()
+    } else {
+        format!(" (from {})", help.keyword_source)
+    };
+    output.print(&format!(
+        "
+Filter keywords{source}:"
+    ));
+    if help.fields.is_empty() {
+        output.print("  none: this check is not filter based.");
+        return Ok(());
+    }
+    output.render_rows(&help.fields, long, &["details"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::{OutputFormat, OutputStyle};
     use crate::nsclient::api::mocks::MockApiClientApiImpl;
-    use crate::nsclient::messages::{ExecuteLine, ExecuteNagiosLine, ListQueriesResult, PerfData};
+    use crate::nsclient::messages::{
+        ExecuteLine, ExecuteNagiosLine, ListQueriesResult, PerfData, QueryField, QueryHelp,
+        QueryParameter,
+    };
     use crate::rendering::StringRender;
     use anyhow::anyhow;
     use std::cell::RefCell;
@@ -79,6 +145,7 @@ mod tests {
             title: "Check CPU".into(),
             description: "Checks the CPU".into(),
             plugin: "CheckSystem".into(),
+            experimental: false,
         }
     }
 
@@ -103,11 +170,11 @@ mod tests {
 
         assert_eq!(
             output_ref.borrow().as_str(),
-            r#"╭───────────┬───────────┬─────────────╮
-│ name      │ title     │ plugin      │
-├───────────┼───────────┼─────────────┤
-│ check_cpu │ Check CPU │ CheckSystem │
-╰───────────┴───────────┴─────────────╯
+            r#"╭───────────┬───────────┬─────────────┬──────────────╮
+│ name      │ title     │ plugin      │ experimental │
+├───────────┼───────────┼─────────────┼──────────────┤
+│ check_cpu │ Check CPU │ CheckSystem │              │
+╰───────────┴───────────┴─────────────┴──────────────╯
 "#
         );
     }
@@ -145,6 +212,7 @@ mod tests {
                     title: "Check CPU".into(),
                     description: "Checks the CPU".into(),
                     plugin: "CheckSystem".into(),
+                    experimental: true,
                     metadata: HashMap::from([("k".to_string(), "v".to_string())]),
                 })
             });
@@ -163,6 +231,258 @@ mod tests {
         let rendered = output_ref.borrow();
         assert!(rendered.contains("name: check_cpu"), "{rendered}");
         assert!(rendered.contains("  k: v"), "{rendered}");
+    }
+
+    fn sample_help(name: &str, keyword_source: &str, fields: Vec<QueryField>) -> QueryHelp {
+        QueryHelp {
+            name: name.into(),
+            keyword_source: keyword_source.into(),
+            parameters: vec![QueryParameter {
+                name: "show-all".into(),
+                default_value: String::new(),
+                required: false,
+                repeatable: false,
+                content_type: "bool".into(),
+                short_description: "Show all items.".into(),
+                long_description: "Show all items.
+Even the boring ones."
+                    .into(),
+            }],
+            fields,
+        }
+    }
+
+    fn free_space() -> Vec<QueryField> {
+        vec![QueryField {
+            name: "free".into(),
+            short_description: "Free space".into(),
+            long_description: "Free disk space on the drive".into(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn describe_text_lists_options_then_keywords() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help()
+            .withf(|id| id == "check_drivesize")
+            .returning(|_| {
+                Ok(Some(sample_help(
+                    "check_drivesize",
+                    "check_drivesize",
+                    free_space(),
+                )))
+            });
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_drivesize".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let rendered = out.borrow();
+        assert!(
+            rendered.contains("Options for check_drivesize:"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("show-all"), "{rendered}");
+        assert!(rendered.contains("Filter keywords:"), "{rendered}");
+        assert!(rendered.contains("free"), "{rendered}");
+        // The long description is behind --long.
+        assert!(!rendered.contains("Even the boring ones."), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn describe_long_reveals_the_full_descriptions() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help().returning(|_| {
+            Ok(Some(sample_help(
+                "check_drivesize",
+                "check_drivesize",
+                free_space(),
+            )))
+        });
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_drivesize".into(),
+                long: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            out.borrow().contains("Even the boring ones."),
+            "{}",
+            out.borrow()
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_names_the_command_an_alias_borrows_its_keywords_from() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help().returning(|_| {
+            Ok(Some(sample_help(
+                "alias_disk",
+                "check_drivesize",
+                free_space(),
+            )))
+        });
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "alias_disk".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            out.borrow()
+                .contains("Filter keywords (from check_drivesize):"),
+            "{}",
+            out.borrow()
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_says_so_when_a_check_is_not_filter_based() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help()
+            .returning(|_| Ok(Some(sample_help("check_ok", "check_ok", vec![]))));
+        let (output, out) = rendering(OutputFormat::Text);
+
+        route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_ok".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            out.borrow()
+                .contains("none: this check is not filter based."),
+            "{}",
+            out.borrow()
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_json_keeps_the_two_halves_apart() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help().returning(|_| {
+            Ok(Some(sample_help(
+                "check_drivesize",
+                "check_drivesize",
+                free_space(),
+            )))
+        });
+        let (output, out) = rendering(OutputFormat::Json);
+
+        route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_drivesize".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&out.borrow()).unwrap();
+        assert_eq!(parsed["parameters"][0]["content_type"], "bool");
+        assert_eq!(parsed["fields"][0]["name"], "free");
+        assert_eq!(parsed["keyword_source"], "check_drivesize");
+    }
+
+    #[tokio::test]
+    async fn describe_error_is_reported() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help()
+            .returning(|_| Err(anyhow!("boom")));
+        let (output, _) = rendering(OutputFormat::Text);
+
+        let err = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_cpu".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Failed to fetch help for query check_cpu: boom"
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_reports_a_query_the_agent_has_nothing_to_say_about() {
+        let mut api = MockApiClientApiImpl::new();
+        // `Ok(None)` is the agent's 404, which is an answer rather than a
+        // failure and reads differently from one.
+        api.expect_get_query_help().returning(|_| Ok(None));
+        let (output, _) = rendering(OutputFormat::Text);
+
+        let err = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_cpu".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("Nothing to describe for query check_cpu"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("queries show check_cpu"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn describe_refuses_csv_rather_than_writing_two_headers_into_one_file() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help()
+            .returning(|_| Ok(Some(sample_help("check_cpu", "check_cpu", free_space()))));
+        let (output, _) = rendering(OutputFormat::Csv);
+
+        let err = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_cpu".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("csv cannot hold both halves"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

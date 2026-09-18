@@ -1,6 +1,6 @@
 use crate::config::{load_history, store_history};
-use crate::nsclient::client::command_input::{CommandInput, CommandType};
-use crate::nsclient::client::events::{UICommand, UIEvent};
+use crate::nsclient::client::command_input::{CommandInput, CommandType, Completion};
+use crate::nsclient::client::events::{QueryHelpAnswer, UICommand, UIEvent};
 use crate::nsclient::client::log_widget::{LogRecord, LogWidget};
 use crate::nsclient::client::status_widget::StatusWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -71,6 +71,13 @@ impl UI<'_> {
             UIEvent::Commands(commands) => {
                 self.command.update_commands(commands);
             }
+            UIEvent::QueryHelp(command, answer) => match answer {
+                QueryHelpAnswer::Described(help) => {
+                    self.command.on_query_help(&command, Some(*help))
+                }
+                QueryHelpAnswer::Nothing => self.command.on_query_help(&command, None),
+                QueryHelpAnswer::Failed => self.command.forget_query_help(&command),
+            },
             UIEvent::Performance(user, kernel, memory) => {
                 self.status.on_performance(user, kernel, memory)
             }
@@ -118,7 +125,26 @@ impl UI<'_> {
             KeyCode::Enter => {
                 self.execute().await;
             }
+            KeyCode::Tab => self.complete(),
             _ => self.command.handle_key_event(key_event),
+        }
+        // Typing past a command name is what makes its vocabulary worth having;
+        // the input notices, and this side is the one that can go and ask.
+        if let Some(command) = self.command.take_help_request()
+            && let Err(e) = self
+                .api_sender
+                .send(UICommand::DescribeQuery(command))
+                .await
+        {
+            eprintln!("Error sending API event: {}", e);
+        }
+    }
+
+    /// Complete the word being typed, or show what it could become.
+    fn complete(&mut self) {
+        match self.command.complete() {
+            Completion::Nothing | Completion::Extended => {}
+            Completion::Candidates(candidates) => self.output(&candidates.join("  ")),
         }
     }
 

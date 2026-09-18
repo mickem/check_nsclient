@@ -230,6 +230,16 @@ pub enum QueriesCommand {
     },
     /// Show details about a query
     Show { id: String },
+    /// Show what a query accepts: its options and its filter keywords
+    // Named `describe` rather than `help` (which the REST endpoint is called):
+    // clap reserves `help` for printing a command's own usage, and registering
+    // it here is a hard error at startup.
+    Describe {
+        id: String,
+        /// Show the full descriptions rather than the summary line
+        #[arg(short, long)]
+        long: bool,
+    },
     /// Execute a query (show output)
     #[command(trailing_var_arg = true)]
     Execute {
@@ -438,7 +448,16 @@ pub enum SettingsCommandActionCli {
 #[derive(Subcommand)]
 pub enum MetricsCommand {
     /// Show all metrics as a table (or json/yaml/csv)
-    Show {},
+    Show {
+        /// Also report what each metric means -- its unit, type, help text and
+        /// labels -- read from the same snapshot as the values
+        #[arg(short, long)]
+        meta: bool,
+        /// Show the labels and help text too (only the described listing has
+        /// columns to reveal, so this needs --meta)
+        #[arg(short, long, requires = "meta")]
+        long: bool,
+    },
     /// Dump metrics in the OpenMetrics/Prometheus text exposition format
     Openmetrics {},
 }

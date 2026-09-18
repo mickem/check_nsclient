@@ -1,6 +1,6 @@
 use crate::nsclient::api::ApiClientApi;
 use crate::nsclient::client::command_input::{CommandType, ModuleCommand, QueryCommand};
-use crate::nsclient::client::events::{UICommand, UIEvent, send_or_error};
+use crate::nsclient::client::events::{QueryHelpAnswer, UICommand, UIEvent, send_or_error};
 use crate::nsclient::client::log_widget::{LogLevel, LogRecord};
 use crate::nsclient::messages::Metrics;
 use std::time::Duration;
@@ -159,6 +159,19 @@ impl BackendProxy {
                     anyhow::bail!("Exit should not be sent to API");
                 }
             },
+            // A query with no help is not an error the user needs to see: an
+            // agent that predates the endpoint has none for any command, and
+            // saying so once per command would be all they saw. A request that
+            // *failed* is a different thing and is not remembered as an answer.
+            UICommand::DescribeQuery(name) => {
+                let answer = match self.api.get_query_help(&name).await {
+                    Ok(Some(help)) => QueryHelpAnswer::Described(Box::new(help)),
+                    Ok(None) => QueryHelpAnswer::Nothing,
+                    Err(_) => QueryHelpAnswer::Failed,
+                };
+                self.send_or_error(UIEvent::QueryHelp(name, answer)).await;
+                Ok(())
+            }
         }
     }
 
