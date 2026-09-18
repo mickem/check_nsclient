@@ -767,20 +767,13 @@ fn queries_list_and_show() {
         );
     }
 
-    // `queries list --all` is deliberately not exercised here. `all=true` is not
-    // a filter on this endpoint: it sets `fetch_all`, which makes the agent run
-    // *every* registered command with `help-pb` to collect its parameters.
-    // Against the pinned 0.18.0 that call takes 6.1s where the plain listing
-    // takes 0.083s, and for 3.7s of it the agent stops accepting connections
-    // altogether -- measured here with an independent prober. Whichever test
-    // took the server lock next then died on its first request with
-    // `os error 10053` (WSAECONNABORTED), which is why the suite kept failing
-    // in a different place each run.
-    //
-    // NSClient++ now ignores `all` on this endpoint for the same reason (it
-    // "held a WEB server thread for all of it", freezing the whole web UI), so
-    // there is nothing left here for the flag to do. The flag itself is still
-    // covered against `modules`, `aliases` and `scripts`, which honour it.
+    // There is no `--all` to exercise: `queries list` never sends one. On this
+    // endpoint `all=true` set `fetch_all`, which made the agent run *every*
+    // registered command with `help-pb` to collect its parameters -- against
+    // the pinned 0.18.0, 6.1s where the plain listing takes 0.083s, with the
+    // agent refusing connections for 3.7s of it. That is what used to make this
+    // suite fail somewhere different every run. `--all` is still covered
+    // against `modules`, which honours it.
 
     let shown = client.json(&["queries", "show", "check_ok"]);
     assert_eq!(shown["name"], "check_ok");

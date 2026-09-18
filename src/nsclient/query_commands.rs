@@ -13,7 +13,7 @@ pub async fn route_query_commands(
     command: &QueriesCommand,
 ) -> anyhow::Result<i32> {
     match &command {
-        QueriesCommand::List { all, long } => match api.list_queries(all).await {
+        QueriesCommand::List { long } => match api.list_queries().await {
             Ok(queries) => {
                 output.render_rows(&queries, long, &["description"])?;
                 Ok(0)
@@ -86,20 +86,12 @@ mod tests {
     async fn list_text_shows_name_by_default_and_hides_description() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_list_queries()
-            .withf(|all| !*all)
-            .returning(|_| Ok(vec![sample_query()]));
+            .returning(|| Ok(vec![sample_query()]));
         let (output, output_ref) = rendering(OutputFormat::Text);
 
-        route_query_commands(
-            output,
-            Box::new(api),
-            &QueriesCommand::List {
-                all: false,
-                long: false,
-            },
-        )
-        .await
-        .unwrap();
+        route_query_commands(output, Box::new(api), &QueriesCommand::List { long: false })
+            .await
+            .unwrap();
 
         assert_eq!(
             output_ref.borrow().as_str(),
@@ -116,20 +108,12 @@ mod tests {
     async fn list_long_shows_description() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_list_queries()
-            .withf(|all| *all)
-            .returning(|_| Ok(vec![sample_query()]));
+            .returning(|| Ok(vec![sample_query()]));
         let (output, output_ref) = rendering(OutputFormat::Text);
 
-        route_query_commands(
-            output,
-            Box::new(api),
-            &QueriesCommand::List {
-                all: true,
-                long: true,
-            },
-        )
-        .await
-        .unwrap();
+        route_query_commands(output, Box::new(api), &QueriesCommand::List { long: true })
+            .await
+            .unwrap();
 
         assert!(output_ref.borrow().contains("Checks the CPU"));
     }
@@ -288,18 +272,12 @@ mod tests {
     #[tokio::test]
     async fn successful_commands_return_zero() {
         let mut api = MockApiClientApiImpl::new();
-        api.expect_list_queries().returning(|_| Ok(vec![]));
+        api.expect_list_queries().returning(|| Ok(vec![]));
         let (output, _) = rendering(OutputFormat::Json);
-        let code = route_query_commands(
-            output,
-            Box::new(api),
-            &QueriesCommand::List {
-                all: false,
-                long: false,
-            },
-        )
-        .await
-        .unwrap();
+        let code =
+            route_query_commands(output, Box::new(api), &QueriesCommand::List { long: false })
+                .await
+                .unwrap();
         assert_eq!(code, 0);
     }
 

@@ -271,7 +271,14 @@ pub trait ApiClientApi: Send + Sync {
     /// `${module-path}/<id>.zip` and then loads it, so the archive runs as the
     /// service user.
     async fn upload_module(&self, id: &str, archive: Vec<u8>) -> anyhow::Result<()>;
-    async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
+    /// Every check command the agent has registered.
+    ///
+    /// There is no `all` to pass. Asking for it made the agent run every
+    /// registered command with `help-pb` to collect its parameters -- seconds
+    /// of work holding a WEB server thread, during which it answered nothing
+    /// else -- and the listing does not report parameters anyway. NSClient++
+    /// now ignores the parameter for that reason.
+    async fn list_queries(&self) -> anyhow::Result<Vec<ListQueriesResult>>;
     async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
     async fn execute_query(
@@ -427,8 +434,13 @@ impl ApiClientApi for ApiClient {
             .map(|_| ())
     }
 
-    async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>> {
-        let params = [("all".to_string(), all.to_string())];
+    async fn list_queries(&self) -> anyhow::Result<Vec<ListQueriesResult>> {
+        // `all=false` is sent although no caller can ask for anything else,
+        // because an agent that still honours the parameter defaults it to
+        // *true* when it is absent. Leaving it off asks such an agent for the
+        // expensive inventory: measured against 0.18.0, 6.6s versus 0.083s.
+        // Newer agents ignore it, so this costs them nothing.
+        let params = [("all".to_string(), "false".to_string())];
         self.get_with_query("api/v2/queries", &params).await
     }
 
@@ -635,7 +647,7 @@ pub mod mocks {
             async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult>;
             async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
             async fn upload_module(&self, id: &str, archive: Vec<u8>) -> anyhow::Result<()>;
-            async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
+            async fn list_queries(&self) -> anyhow::Result<Vec<ListQueriesResult>>;
             async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
             async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
             async fn execute_query(
