@@ -70,6 +70,12 @@ const BACKOFF: Duration = Duration::from_millis(250);
 /// busy -- it is whichever one took the lock next, which is why the suite used
 /// to fail somewhere different every run.
 ///
+/// The same window can close on a connection that already got through TLS: the
+/// agent then shuts the socket without a `close_notify` alert, and rustls
+/// reports that in its own words rather than as an OS error code. That is
+/// what `settings descriptions` died of right after `settings command reload`
+/// on Windows, so it is matched here too.
+///
 /// Such a run is retried rather than failed: this suite tests the CLI, not the
 /// agent's accept queue. The match is deliberately narrow -- a TLS rejection, an
 /// HTTP error status, or anything else the agent actually answered with is a
@@ -83,9 +89,34 @@ fn dropped_the_connection(stderr: &str) -> bool {
             "os error 104",   // ECONNRESET
             "os error 111",   // ECONNREFUSED
             "connection closed before message completed",
+            "peer closed connection without sending TLS close_notify",
+            "unexpected end of file", // io::ErrorKind::UnexpectedEof
         ]
         .iter()
         .any(|abort| stderr.contains(abort))
+}
+
+#[test]
+fn a_dropped_connection_is_recognised_in_every_wording_the_agent_produces() {
+    // Verbatim from the CI runs the retry exists for.
+    let windows_abort = "Error: Failed to fetch settings status: error sending request for url \
+        (https://127.0.0.1:8443/api/v2/settings/status): client error (SendRequest): \
+        connection error: An established connection was aborted by the software in \
+        your host machine. (os error 10053)";
+    let tls_eof = "Error: Failed to fetch settings descriptions: error sending request for url \
+        (https://127.0.0.1:8443/api/v2/settings/descriptions?samples=false): client error \
+        (SendRequest): connection error: peer closed connection without sending TLS \
+        close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof";
+    assert!(dropped_the_connection(windows_abort));
+    assert!(dropped_the_connection(tls_eof));
+
+    // Anything the agent actually answered with is a real result.
+    let refused_tls = "Error: error sending request for url (https://127.0.0.1:8443/api/v2/info): \
+        client error (Connect): invalid peer certificate: UnknownIssuer";
+    let http_error = "Error: Failed to fetch module: HTTP 404 Not Found";
+    assert!(!dropped_the_connection(refused_tls));
+    assert!(!dropped_the_connection(http_error));
+    assert!(!dropped_the_connection(""));
 }
 
 /// An NSClient++ target plus exclusive access to it for the duration of a test.

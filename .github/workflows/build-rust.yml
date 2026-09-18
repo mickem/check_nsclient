@@ -10,16 +10,19 @@ on:
         type: string
         description: 'Version to build'
         required: true
+    # Signing credentials. Optional: a push Dependabot makes runs without
+    # repository secrets, and the Windows binaries of such a build are simply
+    # left unsigned (see the Sign step). Release builds on main always have them.
     secrets:
       AZURE_TENANT_ID:
         description: 'Azure tenant ID'
-        required: true
+        required: false
       AZURE_CLIENT_ID:
         description: 'Azure client ID'
-        required: true
+        required: false
       AZURE_CLIENT_SECRET:
         description: 'Azure client secret'
-        required: true
+        required: false
 
 jobs:
   lint:
@@ -56,6 +59,11 @@ jobs:
   build:
     name: Build ${{ matrix.os }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
+    env:
+      # Secrets cannot be read in a step's `if`, so whether signing is possible
+      # is decided here. Workflows Dependabot triggers get no repository
+      # secrets, and signing with none failed every one of its pushes.
+      CAN_SIGN: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' && secrets.AZURE_TENANT_ID != '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -149,7 +157,7 @@ jobs:
         run: cargo test --release --target ${{ steps.target.outputs.triple }}
 
       - name: Sign Windows Binary
-        if: startsWith(matrix.os, 'windows-')
+        if: startsWith(matrix.os, 'windows-') && env.CAN_SIGN == 'true'
         uses: azure/trusted-signing-action@v1.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
