@@ -3,12 +3,12 @@ use crate::debug;
 use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
-    AliasResult, CachedResult, EventRecord, ExecuteNagiosResult, ExecuteResult, ListModulesResult,
-    ListQueriesResult, LogClearResult, LogRecord, LogStatus, LoginResponse, MetadataChannel,
-    MetadataResource, Metrics, ModulesResult, NewLogRecord, PaginatedResponse, PingResult,
-    QueryResult, ResultFilter, ResultsRemoved, ScriptRuntimes, SettingsCommandAction,
-    SettingsCommandRequest, SettingsDeleteResult, SettingsDescription, SettingsDiff, SettingsEntry,
-    SettingsStatus, Tags,
+    AliasResult, CachedResult, DescribedMetrics, EventRecord, ExecuteNagiosResult, ExecuteResult,
+    ListModulesResult, ListQueriesResult, LogClearResult, LogRecord, LogStatus, LoginResponse,
+    MetadataChannel, MetadataResource, Metrics, ModulesResult, NewLogRecord, PaginatedResponse,
+    PingResult, QueryHelp, QueryResult, ResultFilter, ResultsRemoved, ScriptRuntimes,
+    SettingsCommandAction, SettingsCommandRequest, SettingsDeleteResult, SettingsDescription,
+    SettingsDiff, SettingsEntry, SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -274,6 +274,9 @@ pub trait ApiClientApi: Send + Sync {
     async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
     async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
+    /// Everything a check accepts: every option with its default and its
+    /// description, and every filter keyword it offers.
+    async fn get_query_help(&self, id: &str) -> anyhow::Result<QueryHelp>;
     async fn execute_query(
         &self,
         id: &str,
@@ -329,6 +332,9 @@ pub trait ApiClientApi: Send + Sync {
     async fn get_metadata_channels(&self) -> anyhow::Result<Vec<MetadataChannel>>;
     async fn get_tags(&self) -> anyhow::Result<Tags>;
     async fn get_metrics(&self) -> anyhow::Result<Metrics>;
+    /// The same readings as [`ApiClientApi::get_metrics`] plus what each one
+    /// means, taken from a single snapshot (`?meta=1`).
+    async fn get_metrics_described(&self) -> anyhow::Result<DescribedMetrics>;
     /// Metrics in the OpenMetrics/Prometheus text exposition format.
     async fn get_openmetrics(&self) -> anyhow::Result<String>;
     /// The passive result cache, optionally filtered. With the server's default
@@ -439,6 +445,10 @@ impl ApiClientApi for ApiClient {
 
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult> {
         self.get_json(&format!("api/v2/queries/{id}")).await
+    }
+
+    async fn get_query_help(&self, id: &str) -> anyhow::Result<QueryHelp> {
+        self.get_json(&format!("api/v2/queries/{id}/help")).await
     }
 
     async fn execute_query(
@@ -580,6 +590,14 @@ impl ApiClientApi for ApiClient {
         self.get_json("api/v2/metrics").await
     }
 
+    async fn get_metrics_described(&self) -> anyhow::Result<DescribedMetrics> {
+        // The agent reads `1`, `true` and `yes` as asking for the described
+        // document; anything else -- `0` and a bare `meta` included -- gets the
+        // flat map, which would not deserialize into this shape.
+        let params = [("meta".to_string(), "1".to_string())];
+        self.get_with_query("api/v2/metrics", &params).await
+    }
+
     async fn get_openmetrics(&self) -> anyhow::Result<String> {
         self.get_text("api/v2/openmetrics").await
     }
@@ -638,6 +656,7 @@ pub mod mocks {
             async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
             async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
             async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
+            async fn get_query_help(&self, id: &str) -> anyhow::Result<QueryHelp>;
             async fn execute_query(
                 &self,
                 id: &str,
@@ -672,6 +691,7 @@ pub mod mocks {
             async fn get_metadata_channels(&self) -> anyhow::Result<Vec<MetadataChannel>>;
             async fn get_tags(&self) -> anyhow::Result<Tags>;
             async fn get_metrics(&self) -> anyhow::Result<Metrics>;
+            async fn get_metrics_described(&self) -> anyhow::Result<DescribedMetrics>;
             async fn get_openmetrics(&self) -> anyhow::Result<String>;
             async fn list_results(&self, filter: &ResultFilter) -> anyhow::Result<Vec<CachedResult>>;
             async fn get_result(&self, key: &str) -> anyhow::Result<CachedResult>;
@@ -1491,6 +1511,144 @@ mod tests {
             aliases[0].query_url,
             "https://localhost:8443/api/v2/queries/alias_cpu/"
         );
+    }
+
+    #[tokio::test]
+    async fn described_metrics_pair_values_with_what_they_mean() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/metrics"))
+            // The agent only reads `1`, `true` and `yes` as asking for the
+            // described document; a bare `meta` would return the flat map.
+            .and(query_param("meta", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "metrics": {
+                    "system.mem.physical.used": 5123456789u64,
+                    "system.cpu.core 0.idle": 93,
+                    "workers.jobs": 1847
+                },
+                "metadata": {
+                    "system.mem.physical.used": {
+                        "type": "gauge",
+                        "help": "Physical memory in use",
+                        "unit": "bytes"
+                    },
+                    "system.cpu.core 0.idle": {
+                        "type": "gauge",
+                        "unit": "percent",
+                        "labels": {"core": "0"}
+                    },
+                    "workers.jobs": {"type": "counter"}
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let described = api.get_metrics_described().await.unwrap();
+        assert_eq!(described.metrics["workers.jobs"], 1847);
+
+        let rows = described.to_rows();
+        // Sorted by metric name, so the order does not depend on the map.
+        let names: Vec<&str> = rows.iter().map(|r| r.metric.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "system.cpu.core 0.idle",
+                "system.mem.physical.used",
+                "workers.jobs"
+            ]
+        );
+
+        let memory = &rows[1];
+        assert_eq!(memory.value, "5123456789");
+        assert_eq!(memory.unit, "bytes");
+        assert_eq!(memory.metric_type, "gauge");
+        assert_eq!(memory.help, "Physical memory in use");
+        assert_eq!(memory.labels, "");
+
+        // A per-instance metric carries its labels; one the producer described
+        // only partly leaves the rest empty rather than rendering `null`.
+        assert_eq!(rows[0].labels, "core=0");
+        assert_eq!(rows[0].help, "");
+        assert_eq!(rows[2].metric_type, "counter");
+        assert_eq!(rows[2].unit, "");
+    }
+
+    #[tokio::test]
+    async fn query_help_reports_options_and_filter_keywords() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/check_drivesize/help"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "check_drivesize",
+                "keyword_source": "check_drivesize",
+                "parameters": [
+                    {
+                        "name": "filter",
+                        "default_value": "none",
+                        "required": false,
+                        "repeatable": false,
+                        "content_type": "string",
+                        "short_description": "Filter which marks interesting items.",
+                        "short_description_long": "ignored",
+                        "long_description": "Filter which marks interesting items.
+Common option for all filter checks."
+                    },
+                    {
+                        "name": "show-all",
+                        "default_value": "",
+                        "required": false,
+                        "repeatable": false,
+                        "content_type": "bool",
+                        "short_description": "Show all items.",
+                        "long_description": "Show all items."
+                    }
+                ],
+                "fields": [
+                    {"name": "free", "short_description": "", "long_description": "Free disk space"},
+                    {"name": "convert_bytes()", "short_description": "", "long_description": "Convert a byte value."}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let help = api.get_query_help("check_drivesize").await.unwrap();
+        assert_eq!(help.name, "check_drivesize");
+        assert_eq!(help.keyword_source, "check_drivesize");
+        assert_eq!(help.parameters.len(), 2);
+        assert_eq!(help.parameters[0].default_value, "none");
+        assert_eq!(help.parameters[0].content_type, "string");
+        // A bool with an empty default is a plain switch that takes no value.
+        assert_eq!(help.parameters[1].content_type, "bool");
+        assert_eq!(help.parameters[1].default_value, "");
+        // A filter function keeps the "()" the registry marks it with.
+        assert_eq!(help.fields[1].name, "convert_bytes()");
+    }
+
+    #[tokio::test]
+    async fn query_help_of_a_check_that_is_not_filter_based_has_no_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/check_ok/help"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "alias_ok",
+                "keyword_source": "check_ok",
+                "parameters": [],
+                "fields": []
+            })))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let help = api.get_query_help("check_ok").await.unwrap();
+        assert!(help.fields.is_empty());
+        // An alias reports the command its keywords would have come from.
+        assert_eq!(help.keyword_source, "check_ok");
+        assert_eq!(help.name, "alias_ok");
     }
 
     #[tokio::test]

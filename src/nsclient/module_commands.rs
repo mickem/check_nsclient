@@ -108,6 +108,7 @@ mod tests {
             description: "System checks".into(),
             enabled: true,
             loaded: false,
+            experimental: false,
             metadata: ListModulesMetadata {
                 alias: "sys".into(),
                 plugin_id: "7".into(),
@@ -136,11 +137,11 @@ mod tests {
 
         assert_eq!(
             output_ref.borrow().as_str(),
-            r#"╭─────────────┬──────────────┬─────────┬────────┬───────╮
-│ id          │ title        │ enabled │ loaded │ alias │
-├─────────────┼──────────────┼─────────┼────────┼───────┤
-│ CheckSystem │ Check System │ true    │ false  │ sys   │
-╰─────────────┴──────────────┴─────────┴────────┴───────╯
+            r#"╭─────────────┬──────────────┬─────────┬────────┬──────────────┬───────╮
+│ id          │ title        │ enabled │ loaded │ experimental │ alias │
+├─────────────┼──────────────┼─────────┼────────┼──────────────┼───────┤
+│ CheckSystem │ Check System │ true    │ false  │              │ sys   │
+╰─────────────┴──────────────┴─────────┴────────┴──────────────┴───────╯
 "#
         );
     }
@@ -205,6 +206,7 @@ mod tests {
                     description: "System checks".into(),
                     enabled: true,
                     loaded: false,
+                    experimental: true,
                     metadata: ListModulesMetadata {
                         alias: "sys".into(),
                         plugin_id: "7".into(),
@@ -224,8 +226,19 @@ mod tests {
         .unwrap();
 
         let rendered = output_ref.borrow();
-        assert!(rendered.contains("│ plugin_id   │ 7"), "{rendered}");
-        assert!(rendered.contains("│ alias       │ sys"), "{rendered}");
+        // Matched without the padding: the key column is as wide as its widest
+        // key, so adding one shifts every value.
+        let row = |key: &str, value: &str| {
+            rendered
+                .lines()
+                .any(|l| l.split('│').map(str::trim).eq(["", key, value, ""]))
+        };
+        assert!(row("plugin_id", "7"), "{rendered}");
+        assert!(row("alias", "sys"), "{rendered}");
+        assert!(
+            row("experimental", "true"),
+            "an experimental module says so: {rendered}"
+        );
     }
 
     #[tokio::test]

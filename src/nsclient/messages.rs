@@ -81,6 +81,98 @@ pub struct ScriptRuntimes {
 
 pub type Metrics = HashMap<String, Value>;
 
+/// What one metric means, from `/api/v2/metrics?meta=1`.
+///
+/// Only `type` is always there. `help`, `unit` and `labels` appear only where
+/// the producing module declared them, so a metric published through the bare
+/// `add_metric()` shorthand carries its type and nothing it never said.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MetricDescription {
+    /// `gauge`, `counter`, `unknown`, `info`, `summary` or `histogram`.
+    #[serde(rename = "type")]
+    pub metric_type: String,
+    #[serde(default)]
+    pub help: Option<String>,
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Set where the metric is measured per instance, e.g. `{"core": "0"}`.
+    #[serde(default)]
+    pub labels: Option<HashMap<String, String>>,
+}
+
+/// `/api/v2/metrics?meta=1`: the readings and what they mean, from one
+/// snapshot.
+///
+/// The two halves come from the same tick on purpose -- pairing a value with a
+/// unit fetched separately would be a guess -- and `metadata` is keyed by the
+/// same keys as `metrics`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DescribedMetrics {
+    pub metrics: Metrics,
+    #[serde(default)]
+    pub metadata: HashMap<String, MetricDescription>,
+}
+
+/// One described metric as a table row.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct DescribedMetricRow {
+    #[tabled()]
+    pub metric: String,
+    #[tabled()]
+    pub value: String,
+    #[tabled()]
+    pub unit: String,
+    #[tabled(rename = "type")]
+    pub metric_type: String,
+    #[tabled()]
+    pub labels: String,
+    #[tabled()]
+    pub help: String,
+}
+
+impl DescribedMetrics {
+    /// The document as table rows, sorted by metric name.
+    ///
+    /// A metric the agent described nothing about still gets a row: the value
+    /// is the point, and the description is what may be missing. Fields the
+    /// producer never declared render empty rather than as `null`.
+    pub fn to_rows(&self) -> Vec<DescribedMetricRow> {
+        let mut keys: Vec<&String> = self.metrics.keys().collect();
+        keys.sort();
+        keys.into_iter()
+            .map(|key| {
+                let described = self.metadata.get(key);
+                DescribedMetricRow {
+                    metric: key.clone(),
+                    value: match &self.metrics[key] {
+                        Value::String(text) => text.clone(),
+                        Value::Null => String::new(),
+                        other => other.to_string(),
+                    },
+                    unit: described.and_then(|d| d.unit.clone()).unwrap_or_default(),
+                    metric_type: described.map(|d| d.metric_type.clone()).unwrap_or_default(),
+                    labels: described
+                        .and_then(|d| d.labels.as_ref())
+                        .map(render_labels)
+                        .unwrap_or_default(),
+                    help: described.and_then(|d| d.help.clone()).unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+}
+
+/// `{"core": "0", "die": "1"}` as `core=0, die=1`, ordered so the same labels
+/// always render the same way.
+fn render_labels(labels: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<String> = labels
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    pairs.sort();
+    pairs.join(", ")
+}
+
 /// Agent tags: free-form `name -> value` labels attached to this host.
 pub type Tags = HashMap<String, String>;
 
@@ -249,6 +341,16 @@ pub struct LoginResponse {
     pub user: String,
 }
 
+/// Render the `experimental` flag for a table or csv cell.
+///
+/// A settled command is the overwhelmingly common case, so it renders as an
+/// empty cell rather than a column of `false` the eye has to filter out; only a
+/// command that is still moving says so. The serialized forms (json, yaml) keep
+/// the plain boolean, which is what a machine wants.
+fn mark_experimental(experimental: &bool) -> String {
+    if *experimental { "experimental" } else { "" }.to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Tabled)]
 pub struct ListModulesMetadata {
     pub alias: String,
@@ -269,6 +371,12 @@ pub struct ListModulesResult {
     pub enabled: bool,
     #[tabled()]
     pub loaded: bool,
+    /// Set when the module or command says it is still moving: its options,
+    /// filter keywords and output may change in a coming release. Absent from
+    /// agents older than the flag, which is read as "not experimental".
+    #[serde(default)]
+    #[tabled(display = "mark_experimental")]
+    pub experimental: bool,
     #[tabled(inline)]
     pub metadata: ListModulesMetadata,
 }
@@ -287,6 +395,12 @@ pub struct FlatListModulesResult {
     pub enabled: bool,
     #[tabled()]
     pub loaded: bool,
+    /// Set when the module or command says it is still moving: its options,
+    /// filter keywords and output may change in a coming release. Absent from
+    /// agents older than the flag, which is read as "not experimental".
+    #[serde(default)]
+    #[tabled(display = "mark_experimental")]
+    pub experimental: bool,
     #[tabled()]
     pub alias: String,
     #[tabled()]
@@ -301,6 +415,7 @@ impl ListModulesResult {
             description: self.description.clone(),
             enabled: self.enabled,
             loaded: self.loaded,
+            experimental: self.experimental,
             alias: self.metadata.alias.clone(),
             plugin_id: self.metadata.plugin_id.clone(),
         }
@@ -315,6 +430,9 @@ pub struct ModulesResult {
     pub description: String,
     pub enabled: bool,
     pub loaded: bool,
+    /// See [`ListQueriesResult::experimental`].
+    #[serde(default)]
+    pub experimental: bool,
     pub metadata: ListModulesMetadata,
 }
 
@@ -327,6 +445,7 @@ impl ModulesResult {
         map.insert("description".to_string(), self.description.clone());
         map.insert("enabled".to_string(), self.enabled.to_string());
         map.insert("loaded".to_string(), self.loaded.to_string());
+        map.insert("experimental".to_string(), self.experimental.to_string());
         map.insert("alias".to_string(), self.metadata.alias.clone());
         map.insert("plugin_id".to_string(), self.metadata.plugin_id.clone());
         map
@@ -343,6 +462,12 @@ pub struct ListQueriesResult {
     pub description: String,
     #[tabled()]
     pub plugin: String,
+    /// Set when the module or command says it is still moving: its options,
+    /// filter keywords and output may change in a coming release. Absent from
+    /// agents older than the flag, which is read as "not experimental".
+    #[serde(default)]
+    #[tabled(display = "mark_experimental")]
+    pub experimental: bool,
 }
 
 /// One metadata resource advertised by `/api/v2/metadata`.
@@ -431,6 +556,10 @@ pub struct AliasResult {
     pub description: String,
     #[tabled()]
     pub plugin: String,
+    /// See [`ListQueriesResult::experimental`].
+    #[serde(default)]
+    #[tabled(display = "mark_experimental")]
+    pub experimental: bool,
     /// Aliases are executed through the regular queries endpoint.
     #[tabled(skip)]
     #[serde(default)]
@@ -450,6 +579,10 @@ pub struct QueryResult {
     pub description: String,
     #[tabled()]
     pub plugin: String,
+    /// See [`ListQueriesResult::experimental`].
+    #[serde(default)]
+    #[tabled(display = "mark_experimental")]
+    pub experimental: bool,
     #[tabled(skip)]
     pub metadata: HashMap<String, String>,
 }
@@ -461,8 +594,76 @@ impl QueryResult {
         map.insert("title".to_string(), self.title.clone());
         map.insert("description".to_string(), self.description.clone());
         map.insert("plugin".to_string(), self.plugin.clone());
+        map.insert("experimental".to_string(), self.experimental.to_string());
         map
     }
+}
+
+/// One option a check accepts, from `/api/v2/queries/{query}/help`.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct QueryParameter {
+    #[tabled()]
+    pub name: String,
+    #[tabled(rename = "default")]
+    #[serde(default)]
+    pub default_value: String,
+    #[tabled()]
+    #[serde(default)]
+    pub required: bool,
+    #[tabled()]
+    #[serde(default)]
+    pub repeatable: bool,
+    /// `bool` for an option that takes a boolean, `string` for everything else.
+    ///
+    /// A boolean option still takes a value on the wire (`show-all=true`), so
+    /// this is what tells a caller which of the two to send. A `bool` with an
+    /// empty `default` is a plain switch that takes no value at all.
+    #[tabled(rename = "type")]
+    #[serde(default)]
+    pub content_type: String,
+    #[tabled(rename = "description")]
+    #[serde(default)]
+    pub short_description: String,
+    /// Hidden unless `--long` is asked for: it runs to several lines.
+    #[tabled(rename = "details")]
+    #[serde(default)]
+    pub long_description: String,
+}
+
+/// One filter keyword a check offers.
+///
+/// A filter *function* keeps the trailing `()` the registry marks it with,
+/// since that is the only thing that tells it from a variable; the suffix is
+/// not part of the name.
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct QueryField {
+    #[tabled()]
+    pub name: String,
+    #[tabled(rename = "description")]
+    #[serde(default)]
+    pub short_description: String,
+    /// Hidden unless `--long` is asked for: it runs to several lines.
+    #[tabled(rename = "details")]
+    #[serde(default)]
+    pub long_description: String,
+}
+
+/// Everything a check accepts: `/api/v2/queries/{query}/help`.
+///
+/// A check that is not filter based answers with an empty `fields` list rather
+/// than with a pretence.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QueryHelp {
+    pub name: String,
+    /// The command the keywords belong to. It differs from `name` only for an
+    /// alias, which declares no keywords of its own -- its filter expressions
+    /// are written in the keywords of the command it stands for.
+    #[serde(default)]
+    pub keyword_source: String,
+    #[serde(default)]
+    pub parameters: Vec<QueryParameter>,
+    #[serde(default)]
+    pub fields: Vec<QueryField>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
