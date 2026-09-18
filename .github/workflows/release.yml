@@ -29,6 +29,11 @@ jobs:
         with:
           name: check_nsclient-windows-x86
           path: artifacts/windows-x86
+      - name: Download windows arm64
+        uses: actions/download-artifact@v7
+        with:
+          name: check_nsclient-windows-arm64
+          path: artifacts/windows-arm64
       - name: Download linux x64
         uses: actions/download-artifact@v7
         with:
@@ -45,6 +50,7 @@ jobs:
           mkdir -p release
           cp artifacts/windows-x64/check_nsclient.exe   release/check_nsclient-${{ inputs.version }}-windows-x64.exe
           cp artifacts/windows-x86/check_nsclient.exe   release/check_nsclient-${{ inputs.version }}-windows-x86.exe
+          cp artifacts/windows-arm64/check_nsclient.exe release/check_nsclient-${{ inputs.version }}-windows-arm64.exe
           cp artifacts/linux-x64/check_nsclient         release/check_nsclient-${{ inputs.version }}-linux-x64
           cp artifacts/linux-arm64/check_nsclient       release/check_nsclient-${{ inputs.version }}-linux-arm64
           chmod +x release/check_nsclient-${{ inputs.version }}-linux-x64 release/check_nsclient-${{ inputs.version }}-linux-arm64
@@ -61,5 +67,6 @@ jobs:
           artifacts: |
             release/check_nsclient-${{ inputs.version }}-windows-x64.exe
             release/check_nsclient-${{ inputs.version }}-windows-x86.exe
+            release/check_nsclient-${{ inputs.version }}-windows-arm64.exe
             release/check_nsclient-${{ inputs.version }}-linux-x64
             release/check_nsclient-${{ inputs.version }}-linux-arm64
