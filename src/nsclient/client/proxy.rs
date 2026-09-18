@@ -58,7 +58,7 @@ impl BackendProxy {
         .await;
     }
     pub async fn update_commands(&self) {
-        self.send_or_error(match self.api.list_queries(&false).await {
+        self.send_or_error(match self.api.list_queries().await {
             Ok(queries) => {
                 let queries = queries.iter().map(|q| q.name.clone()).collect();
                 UIEvent::Commands(queries)
@@ -137,7 +137,7 @@ impl BackendProxy {
                     Ok(())
                 }
                 CommandType::Queries => {
-                    let commands = self.api.list_queries(&false).await?;
+                    let commands = self.api.list_queries().await?;
                     self.update_log().await;
                     for command in commands {
                         self.output(command.name).await;

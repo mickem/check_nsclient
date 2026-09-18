@@ -221,9 +221,6 @@ pub enum ModulesCommand {
 pub enum QueriesCommand {
     /// List queries
     List {
-        /// List all queries (not just loaded queries)
-        #[arg(short, long)]
-        all: bool,
         /// Show all information (same as --output-long)
         #[arg(short, long)]
         long: bool,
@@ -262,9 +259,6 @@ pub enum QueriesCommand {
 pub enum AliasesCommand {
     /// List aliases
     List {
-        /// List all aliases (including modules that are not loaded)
-        #[arg(short, long)]
-        all: bool,
         /// Show all information (same as --output-long)
         #[arg(short, long)]
         long: bool,

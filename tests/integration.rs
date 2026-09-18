@@ -65,10 +65,13 @@ const BACKOFF: Duration = Duration::from_millis(250);
 ///
 /// The agent this suite pins stops accepting connections while it is busy, and
 /// a caller that connects into such a window gets the socket shut in its face:
-/// `os error 10053` (WSAECONNABORTED) on Windows. The tests already take turns
-/// through [`SERVER`], so the casualty is never the test that made the agent
-/// busy -- it is whichever one took the lock next, which is why the suite used
-/// to fail somewhere different every run.
+/// `os error 10053` (WSAECONNABORTED) on Windows. When the socket dies after the
+/// TLS handshake instead of before it, rustls reports the same drop as an
+/// unclean shutdown (`peer closed connection without sending TLS close_notify`)
+/// rather than as an OS error, so that wording counts too. The tests already
+/// take turns through [`SERVER`], so the casualty is never the test that made
+/// the agent busy -- it is whichever one took the lock next, which is why the
+/// suite used to fail somewhere different every run.
 ///
 /// Such a run is retried rather than failed: this suite tests the CLI, not the
 /// agent's accept queue. The match is deliberately narrow -- a TLS rejection, an
@@ -83,6 +86,9 @@ fn dropped_the_connection(stderr: &str) -> bool {
             "os error 104",   // ECONNRESET
             "os error 111",   // ECONNREFUSED
             "connection closed before message completed",
+            // rustls, when the agent drops an established connection without
+            // closing it down first.
+            "without sending TLS close_notify",
         ]
         .iter()
         .any(|abort| stderr.contains(abort))
@@ -767,20 +773,13 @@ fn queries_list_and_show() {
         );
     }
 
-    // `queries list --all` is deliberately not exercised here. `all=true` is not
-    // a filter on this endpoint: it sets `fetch_all`, which makes the agent run
-    // *every* registered command with `help-pb` to collect its parameters.
-    // Against the pinned 0.18.0 that call takes 6.1s where the plain listing
-    // takes 0.083s, and for 3.7s of it the agent stops accepting connections
-    // altogether -- measured here with an independent prober. Whichever test
-    // took the server lock next then died on its first request with
-    // `os error 10053` (WSAECONNABORTED), which is why the suite kept failing
-    // in a different place each run.
-    //
-    // NSClient++ now ignores `all` on this endpoint for the same reason (it
-    // "held a WEB server thread for all of it", freezing the whole web UI), so
-    // there is nothing left here for the flag to do. The flag itself is still
-    // covered against `modules`, `aliases` and `scripts`, which honour it.
+    // There is no `--all` to exercise: `queries list` never sends one. On this
+    // endpoint `all=true` set `fetch_all`, which made the agent run *every*
+    // registered command with `help-pb` to collect its parameters -- against
+    // the pinned 0.18.0, 6.1s where the plain listing takes 0.083s, with the
+    // agent refusing connections for 3.7s of it. That is what used to make this
+    // suite fail somewhere different every run. The flag itself is still covered
+    // against `modules` and `scripts`, which honour it.
 
     let shown = client.json(&["queries", "show", "check_ok"]);
     assert_eq!(shown["name"], "check_ok");
@@ -943,9 +942,8 @@ fn aliases_list() {
     let long = client.text(&["aliases", "list", "--long"]);
     assert!(long.contains("description"), "{long}");
 
-    // An alias resolves through the regular queries flow.
-    let all = client.json(&["aliases", "list", "--all"]);
-    assert!(all.as_array().unwrap().len() >= list.len());
+    // There is no `--all` to exercise: the agent's alias inventory never read
+    // the flag, so it only ever promised something it did not do.
 }
 
 // ---------------------------------------------------------------------------
