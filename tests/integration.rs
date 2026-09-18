@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_check_nsclient");
@@ -52,6 +53,39 @@ fn lock_server() -> MutexGuard<'static, ()> {
     // A panicking test poisons the mutex; the next test should still run
     // (and report its own result) rather than fail on the poison.
     SERVER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How many times a single `check_nsclient` invocation is attempted, and how
+/// long to wait in between.
+const ATTEMPTS: u32 = 3;
+const BACKOFF: Duration = Duration::from_millis(250);
+
+/// Did this run fail because NSClient++ dropped the connection rather than
+/// answering it?
+///
+/// The agent this suite pins stops accepting connections while it is busy, and
+/// a caller that connects into such a window gets the socket shut in its face:
+/// `os error 10053` (WSAECONNABORTED) on Windows. The tests already take turns
+/// through [`SERVER`], so the casualty is never the test that made the agent
+/// busy -- it is whichever one took the lock next, which is why the suite used
+/// to fail somewhere different every run.
+///
+/// Such a run is retried rather than failed: this suite tests the CLI, not the
+/// agent's accept queue. The match is deliberately narrow -- a TLS rejection, an
+/// HTTP error status, or anything else the agent actually answered with is a
+/// real result and is handed back untouched.
+fn dropped_the_connection(stderr: &str) -> bool {
+    stderr.contains("error sending request")
+        && [
+            "os error 10053", // WSAECONNABORTED
+            "os error 10054", // WSAECONNRESET
+            "os error 10061", // WSAECONNREFUSED
+            "os error 104",   // ECONNRESET
+            "os error 111",   // ECONNREFUSED
+            "connection closed before message completed",
+        ]
+        .iter()
+        .any(|abort| stderr.contains(abort))
 }
 
 /// An NSClient++ target plus exclusive access to it for the duration of a test.
@@ -137,11 +171,27 @@ impl Client {
     }
 
     /// Run the binary with `args` verbatim (no profile is injected).
+    ///
+    /// A run the agent killed at the socket is retried; see
+    /// [`dropped_the_connection`].
     fn run(&self, args: &[&str]) -> Output {
-        self.command()
-            .args(args)
-            .output()
-            .expect("failed to spawn check_nsclient")
+        for attempt in 1..=ATTEMPTS {
+            let out = self
+                .command()
+                .args(args)
+                .output()
+                .expect("failed to spawn check_nsclient");
+            if attempt == ATTEMPTS || !dropped_the_connection(&stderr(&out)) {
+                return out;
+            }
+            eprintln!(
+                "retrying `{}` (attempt {attempt}): {}",
+                args.join(" "),
+                stderr(&out).trim()
+            );
+            std::thread::sleep(BACKOFF);
+        }
+        unreachable!("the loop returns on its last attempt")
     }
 
     /// Run an `nsclient` sub command against this client's profile with the given
@@ -717,8 +767,20 @@ fn queries_list_and_show() {
         );
     }
 
-    let all = client.json(&["queries", "list", "--all"]);
-    assert!(all.as_array().unwrap().len() >= list.as_array().unwrap().len());
+    // `queries list --all` is deliberately not exercised here. `all=true` is not
+    // a filter on this endpoint: it sets `fetch_all`, which makes the agent run
+    // *every* registered command with `help-pb` to collect its parameters.
+    // Against the pinned 0.18.0 that call takes 6.1s where the plain listing
+    // takes 0.083s, and for 3.7s of it the agent stops accepting connections
+    // altogether -- measured here with an independent prober. Whichever test
+    // took the server lock next then died on its first request with
+    // `os error 10053` (WSAECONNABORTED), which is why the suite kept failing
+    // in a different place each run.
+    //
+    // NSClient++ now ignores `all` on this endpoint for the same reason (it
+    // "held a WEB server thread for all of it", freezing the whole web UI), so
+    // there is nothing left here for the flag to do. The flag itself is still
+    // covered against `modules`, `aliases` and `scripts`, which honour it.
 
     let shown = client.json(&["queries", "show", "check_ok"]);
     assert_eq!(shown["name"], "check_ok");
