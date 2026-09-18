@@ -65,10 +65,13 @@ const BACKOFF: Duration = Duration::from_millis(250);
 ///
 /// The agent this suite pins stops accepting connections while it is busy, and
 /// a caller that connects into such a window gets the socket shut in its face:
-/// `os error 10053` (WSAECONNABORTED) on Windows. The tests already take turns
-/// through [`SERVER`], so the casualty is never the test that made the agent
-/// busy -- it is whichever one took the lock next, which is why the suite used
-/// to fail somewhere different every run.
+/// `os error 10053` (WSAECONNABORTED) on Windows. When the socket dies after the
+/// TLS handshake instead of before it, rustls reports the same drop as an
+/// unclean shutdown (`peer closed connection without sending TLS close_notify`)
+/// rather than as an OS error, so that wording counts too. The tests already
+/// take turns through [`SERVER`], so the casualty is never the test that made
+/// the agent busy -- it is whichever one took the lock next, which is why the
+/// suite used to fail somewhere different every run.
 ///
 /// Such a run is retried rather than failed: this suite tests the CLI, not the
 /// agent's accept queue. The match is deliberately narrow -- a TLS rejection, an
@@ -83,6 +86,9 @@ fn dropped_the_connection(stderr: &str) -> bool {
             "os error 104",   // ECONNRESET
             "os error 111",   // ECONNREFUSED
             "connection closed before message completed",
+            // rustls, when the agent drops an established connection without
+            // closing it down first.
+            "without sending TLS close_notify",
         ]
         .iter()
         .any(|abort| stderr.contains(abort))
