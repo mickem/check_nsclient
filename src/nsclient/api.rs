@@ -22,6 +22,18 @@ use std::sync::RwLock;
 /// Maximum number of bytes of a response body to include in an error message.
 const MAX_ERROR_BODY_LEN: usize = 512;
 
+/// The query parameter the two listings that no longer expose `--all` still pin.
+///
+/// No caller can ask for anything else, yet the parameter is sent, because an
+/// agent that still honours it defaults it to *true* when it is absent. On
+/// `queries` that means running every registered command with `help-pb` to
+/// collect its parameters -- 6.6s against 0.083s on the pinned 0.18.0, holding a
+/// WEB server thread for all of it and answering nothing else meanwhile. On
+/// `aliases` it means a scan of the module directory (0.124s against 0.110s) for
+/// an answer that is identical either way. Newer agents ignore the parameter, so
+/// pinning it costs them nothing.
+const NO_FETCH_ALL: [(&str, &str); 1] = [("all", "false")];
+
 fn header_or_zero(headers: &HeaderMap, key: &str) -> u64 {
     headers
         .get(key)
@@ -98,10 +110,12 @@ impl ApiClient {
         Ok(response.text().await?)
     }
 
-    async fn get_with_query<T: DeserializeOwned>(
+    /// GET `path` with `query` appended, e.g. `&[("all", "false")]`; any
+    /// `Serialize` shape reqwest accepts as a query string will do.
+    async fn get_with_query<T: DeserializeOwned, Q: Serialize + ?Sized>(
         &self,
         path: &str,
-        query: &[(String, String)],
+        query: &Q,
     ) -> anyhow::Result<T> {
         let response = self.send(Method::GET, path, |b| b.query(query)).await?;
         Self::parse_json(response, path).await
@@ -273,17 +287,22 @@ pub trait ApiClientApi: Send + Sync {
     async fn upload_module(&self, id: &str, archive: Vec<u8>) -> anyhow::Result<()>;
     /// Every check command the agent has registered.
     ///
-    /// There is no `all` to pass. Asking for it made the agent run every
-    /// registered command with `help-pb` to collect its parameters -- seconds
-    /// of work holding a WEB server thread, during which it answered nothing
-    /// else -- and the listing does not report parameters anyway. NSClient++
-    /// now ignores the parameter for that reason.
+    /// There is no `all` for the caller to pass. Asking for it made the agent
+    /// run every registered command with `help-pb` to collect its parameters --
+    /// seconds of work holding a WEB server thread, during which it answered
+    /// nothing else -- and the listing does not report parameters anyway.
+    /// NSClient++ now ignores the parameter for that reason.
+    ///
+    /// Implementations must still pin [`NO_FETCH_ALL`] on the wire: an agent
+    /// that reads the parameter defaults it to *true*, so omitting it asks for
+    /// exactly that inventory.
     async fn list_queries(&self) -> anyhow::Result<Vec<ListQueriesResult>>;
     /// Every query alias the agent has registered.
     ///
-    /// Like [`ApiClientApi::list_queries`] this takes no `all`: the alias
-    /// inventory never read the flag, so asking for it changed nothing except
-    /// the promise made to whoever typed it.
+    /// Like [`ApiClientApi::list_queries`] this takes no `all` from the caller:
+    /// the alias inventory never read the flag, so asking for it changed nothing
+    /// except the promise made to whoever typed it. Implementations pin
+    /// [`NO_FETCH_ALL`] here too, for the reason given there.
     async fn list_aliases(&self) -> anyhow::Result<Vec<AliasResult>>;
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
     async fn execute_query(
@@ -418,8 +437,7 @@ impl ApiClientApi for ApiClient {
     }
 
     async fn list_modules(&self, all: &bool) -> anyhow::Result<Vec<ListModulesResult>> {
-        let params = [("all".to_string(), all.to_string())];
-        self.get_with_query("api/v2/modules", &params).await
+        self.get_with_query("api/v2/modules", &[("all", all)]).await
     }
 
     async fn get_module(&self, id: &str) -> anyhow::Result<ModulesResult> {
@@ -440,23 +458,11 @@ impl ApiClientApi for ApiClient {
     }
 
     async fn list_queries(&self) -> anyhow::Result<Vec<ListQueriesResult>> {
-        // `all=false` is sent although no caller can ask for anything else,
-        // because an agent that still honours the parameter defaults it to
-        // *true* when it is absent. Leaving it off asks such an agent for the
-        // expensive inventory: measured against 0.18.0, 6.6s versus 0.083s.
-        // Newer agents ignore it, so this costs them nothing.
-        let params = [("all".to_string(), "false".to_string())];
-        self.get_with_query("api/v2/queries", &params).await
+        self.get_with_query("api/v2/queries", &NO_FETCH_ALL).await
     }
 
     async fn list_aliases(&self) -> anyhow::Result<Vec<AliasResult>> {
-        // Pinned for the same reason as on `queries`: an agent that reads the
-        // parameter defaults it to *true*, which here means scanning the module
-        // directory on every listing. Cheap (measured at 0.124s against 0.110s)
-        // rather than ruinous, but it buys nothing -- the aliases that come
-        // back are identical either way.
-        let params = [("all".to_string(), "false".to_string())];
-        self.get_with_query("api/v2/aliases", &params).await
+        self.get_with_query("api/v2/aliases", &NO_FETCH_ALL).await
     }
 
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult> {
@@ -485,8 +491,7 @@ impl ApiClientApi for ApiClient {
         self.get_json("api/v2/scripts").await
     }
     async fn list_scripts(&self, runtime: &str, all: &bool) -> anyhow::Result<Vec<String>> {
-        let params = [("all".to_string(), all.to_string())];
-        self.get_with_query(&format!("api/v2/scripts/{runtime}"), &params)
+        self.get_with_query(&format!("api/v2/scripts/{runtime}"), &[("all", all)])
             .await
     }
 
@@ -539,18 +544,20 @@ impl ApiClientApi for ApiClient {
         path: &str,
         samples: &bool,
     ) -> anyhow::Result<Vec<SettingsDescription>> {
-        let params = [("samples".to_string(), samples.to_string())];
-        self.get_with_query(&format!("api/v2/settings/descriptions{path}"), &params)
-            .await
+        self.get_with_query(
+            &format!("api/v2/settings/descriptions{path}"),
+            &[("samples", samples)],
+        )
+        .await
     }
 
     async fn get_settings_diff(&self, path: &str) -> anyhow::Result<SettingsDiff> {
-        let params: Vec<(String, String)> = if path.is_empty() {
-            Vec::new()
+        let params: &[(&str, &str)] = if path.is_empty() {
+            &[]
         } else {
-            vec![("path".to_string(), path.to_string())]
+            &[("path", path)]
         };
-        self.get_with_query("api/v2/settings/diff", &params).await
+        self.get_with_query("api/v2/settings/diff", params).await
     }
 
     async fn update_settings(&self, settings: &SettingsEntry) -> anyhow::Result<()> {
@@ -1483,6 +1490,35 @@ mod tests {
         // DELETE returns the events it removed.
         let drained = api.clear_events().await.unwrap();
         assert_eq!(drained[0].event, "eventlog");
+    }
+
+    #[tokio::test]
+    async fn list_queries_never_asks_for_the_parameter_inventory() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries"))
+            // `all=true` here makes the agent run every registered command to
+            // collect its parameters, and an agent that reads the parameter
+            // assumes `true` when it is absent -- so the explicit `false` is
+            // what keeps the listing cheap. See `NO_FETCH_ALL`.
+            .and(query_param("all", "false"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "name": "check_cpu",
+                    "title": "check_cpu",
+                    "description": "Check the CPU load",
+                    "plugin": "CheckSystem"
+                }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let queries = api.list_queries().await.unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].name, "check_cpu");
+        assert_eq!(queries[0].plugin, "CheckSystem");
     }
 
     #[tokio::test]
