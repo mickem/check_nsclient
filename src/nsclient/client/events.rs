@@ -17,10 +17,23 @@ pub enum UIEvent {
     Performance(f64, f64, f64),
     Log(LogRecord),
     Commands(Vec<String>),
-    /// What a query accepts, for completing an argument line. `None` means the
-    /// agent could not say -- an unknown query, or one too old to be asked --
-    /// which is cached just the same so it is not asked again.
-    QueryHelp(String, Box<Option<QueryHelp>>),
+    /// What a query accepts, for completing an argument line.
+    QueryHelp(String, QueryHelpAnswer),
+}
+
+/// What came back when the client asked what a query accepts.
+pub enum QueryHelpAnswer {
+    /// The agent described it.
+    Described(Box<QueryHelp>),
+    /// The agent has nothing to describe: an unknown query, or one on an agent
+    /// from before the endpoint existed. A fact about the query, so it is
+    /// remembered and not asked again.
+    Nothing,
+    /// The asking failed for a reason that may not repeat -- a timeout, a token
+    /// that had to be refreshed. Forgotten rather than remembered, so the next
+    /// keystroke past the command name tries again: caching it would leave
+    /// completion dead for the session with nothing on screen to explain why.
+    Failed,
 }
 
 pub enum UICommand {

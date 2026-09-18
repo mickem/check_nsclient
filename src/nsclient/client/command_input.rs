@@ -1,5 +1,6 @@
 use crate::nsclient::messages::QueryHelp;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use std::collections::HashMap;
 use tui_prompts::FocusState::Focused;
 use tui_prompts::{State, TextState};
 
@@ -94,20 +95,22 @@ pub struct CommandInput<'a> {
     /// The text that was being typed before the user started browsing history with Up/Down;
     /// restored when browsing past the most recent entry.
     draft: Option<String>,
-    /// What the query currently being typed accepts, as the agent described it.
+    /// What each query accepts, as the agent described it.
     ///
-    /// Keyed by command name and holding `None` for a query the agent could not
-    /// describe, so a command without help is asked about once rather than on
-    /// every keystroke.
-    help: Option<(String, Option<QueryHelp>)>,
+    /// Keyed in lower case: the agent matches command names without regard to
+    /// case and so does the prompt, so a cache that did not would treat
+    /// `Check_CPU` and `check_cpu` as two different queries and ask twice.
+    ///
+    /// An entry is put in as `None` the moment the query is asked about and
+    /// overwritten when the answer lands, so a present entry means "asked, do
+    /// not ask again" and a `None` one means "nothing to offer" -- which is
+    /// equally true while the answer is still in flight and if the agent had
+    /// nothing to say. A map rather than one slot, so moving between two
+    /// commands on consecutive lines does not ask about each one every time.
+    help: HashMap<String, Option<QueryHelp>>,
     /// A command whose help the UI should go and fetch. Taken by the caller,
     /// which is the side that can talk to the agent.
     wanted_help: Option<String>,
-    /// The command help has been asked about, remembered separately from
-    /// `wanted_help` because that is emptied as soon as the UI picks the
-    /// request up -- long before the answer comes back. Without it every
-    /// keystroke in the gap would ask again.
-    asked_about: Option<String>,
 }
 
 impl<'a> CommandInput<'a> {
@@ -118,9 +121,8 @@ impl<'a> CommandInput<'a> {
             history,
             history_index: None,
             draft: None,
-            help: None,
+            help: HashMap::new(),
             wanted_help: None,
-            asked_about: None,
         }
     }
 
@@ -130,9 +132,20 @@ impl<'a> CommandInput<'a> {
         self.wanted_help.take()
     }
 
-    /// Record what the agent said a query accepts (or could not say).
-    pub fn on_query_help(&mut self, command: String, help: Option<QueryHelp>) {
-        self.help = Some((command, help));
+    /// Record what the agent said a query accepts (or had nothing to say about).
+    pub fn on_query_help(&mut self, command: &str, help: Option<QueryHelp>) {
+        self.help.insert(help_key(command), help);
+    }
+
+    /// Forget that a query was ever asked about, so the next keystroke past its
+    /// name asks again.
+    ///
+    /// For a request that failed rather than one the agent answered: a timeout
+    /// or a token that needed refreshing says nothing about the query, and
+    /// remembering it would turn a blip into completion that is dead for the
+    /// rest of the session with nothing on screen to explain it.
+    pub fn forget_query_help(&mut self, command: &str) {
+        self.help.remove(&help_key(command));
     }
 
     pub(crate) fn get_history(&self) -> Vec<String> {
@@ -336,16 +349,23 @@ impl<'a> CommandInput<'a> {
         let Some(command) = command_being_argued(value) else {
             return;
         };
-        // Already answered, or already asked and still waiting.
-        if self.help.as_ref().is_some_and(|(name, _)| *name == command)
-            || self.asked_about.as_deref() == Some(command.as_str())
+        // Already asked -- answered or not.
+        if self.help.contains_key(&help_key(command)) {
+            return;
+        }
+        // The prompt accepts a command name in any case and so does the agent,
+        // so `Check_CPU` has to reach this too.
+        if !self
+            .available_commands
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(command))
         {
             return;
         }
-        if !self.available_commands.contains(&command) {
-            return;
-        }
-        self.asked_about = Some(command.clone());
+        let command = command.to_owned();
+        // Entered now, so the keystrokes between asking and being answered do
+        // not each ask again.
+        self.help.insert(help_key(&command), None);
         self.wanted_help = Some(command);
     }
 
@@ -359,6 +379,10 @@ impl<'a> CommandInput<'a> {
         let value = self.command_state.value().to_owned();
         let partial = last_word(&value);
 
+        // Everything before the word being completed. The word itself is what
+        // Tab was asked to finish, so it is never treated as already given.
+        let settled = &value[..value.len() - partial.len()];
+
         let candidates = match command_being_argued(&value) {
             // Still on the first word: the commands themselves.
             None => self
@@ -371,18 +395,15 @@ impl<'a> CommandInput<'a> {
                 .collect::<Vec<_>>(),
             // Past it: what the agent said this query accepts.
             Some(command) => {
-                let Some((name, Some(help))) = &self.help else {
+                let Some(Some(help)) = self.help.get(&help_key(command)) else {
                     return Completion::Nothing;
                 };
-                if *name != command {
-                    return Completion::Nothing;
-                }
                 help.parameters
                     .iter()
                     .filter(|p| p.name.starts_with(partial))
-                    // An option already on the line is not offered again,
-                    // unless the check says it may be repeated.
-                    .filter(|p| p.repeatable || !argument_already_given(&value, &p.name))
+                    // An option already settled on the line is not offered
+                    // again, unless the check says it may be repeated.
+                    .filter(|p| p.repeatable || !argument_already_given(settled, &p.name))
                     .map(suggest_argument)
                     .collect()
             }
@@ -425,40 +446,64 @@ impl<'a> CommandInput<'a> {
     }
 }
 
+/// How a command name is keyed in the help cache.
+///
+/// The agent matches command names without regard to case, so the cache must
+/// too, or `Check_CPU` and `check_cpu` would each be asked about separately.
+fn help_key(command: &str) -> String {
+    command.to_lowercase()
+}
+
+/// The first word of `value`, and everything from the end of it onwards.
+///
+/// The tail is taken from where the word ends rather than from a length
+/// counted off the start of the string, which is what keeps this right for a
+/// value that opens with spaces, and safe for one that opens with a character
+/// wider than a byte. Slicing `value` by `first.len()` does neither: it reads
+/// the wrong place after leading whitespace, and lands inside a character when
+/// the first one is not ASCII.
+fn split_first_word(value: &str) -> Option<(&str, &str)> {
+    let start = value.find(|c: char| !c.is_whitespace())?;
+    let rest = &value[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some((&rest[..end], &rest[end..]))
+}
+
 /// The command whose arguments are being typed, if the input has moved past
 /// the command name.
 ///
 /// `check_cpu` is still the name being typed; `check_cpu ` and `check_cpu w`
 /// are arguments to `check_cpu`. A built-in such as `query check_cpu ` names
 /// the query in the second word instead.
-fn command_being_argued(value: &str) -> Option<String> {
-    let mut words = value.split_whitespace();
-    let first = words.next()?;
-    // Nothing after the first word yet: it is still the command name.
-    if !value[first.len()..].starts_with(char::is_whitespace) {
-        return None;
-    }
+fn command_being_argued(value: &str) -> Option<&str> {
+    let (first, rest) = split_first_word(value)?;
     if first.eq_ignore_ascii_case("query") {
-        let second = words.next()?;
-        let after = value.split_once(second)?.1;
-        return after
-            .starts_with(char::is_whitespace)
-            .then(|| second.to_owned());
+        let (second, rest) = split_first_word(rest)?;
+        return rest.starts_with(char::is_whitespace).then_some(second);
     }
-    Some(first.to_owned())
+    rest.starts_with(char::is_whitespace).then_some(first)
 }
 
 /// The partial word Tab should complete: what follows the last space.
 fn last_word(value: &str) -> &str {
-    match value.rfind(char::is_whitespace) {
-        Some(at) => &value[at + 1..],
-        None => value,
-    }
+    let Some(at) = value.rfind(char::is_whitespace) else {
+        return value;
+    };
+    // `rfind` gives where the whitespace character starts, and a whitespace
+    // character is not always one byte -- a non-breaking space pasted in from a
+    // web page is two. Step over the character, not over a byte.
+    let width = value[at..].chars().next().map_or(1, char::len_utf8);
+    &value[at + width..]
 }
 
-/// Is this option already on the line?
-fn argument_already_given(value: &str, name: &str) -> bool {
-    value
+/// Is this option already settled on the line?
+///
+/// `settled` is the input up to the word being completed, never including it:
+/// the half-typed word *is* what Tab was asked to finish, and counting it as
+/// already given is how `check_cpu critical` + Tab came back with nothing
+/// instead of `check_cpu critical=`.
+fn argument_already_given(settled: &str, name: &str) -> bool {
+    settled
         .split_whitespace()
         .skip(1)
         .any(|word| word == name || word.split_once('=').is_some_and(|(key, _)| key == name))
@@ -825,42 +870,140 @@ mod tests {
         }
     }
 
+    fn sample_help() -> QueryHelp {
+        QueryHelp {
+            name: "check_cpu".into(),
+            keyword_source: "check_cpu".into(),
+            parameters: vec![
+                parameter("warning", "string", "none"),
+                parameter("warn-on-error", "string", "none"),
+                parameter("show-all", "bool", ""),
+                parameter("critical", "string", "none"),
+            ],
+            fields: vec![],
+        }
+    }
+
     /// An input that already knows `check_cpu` and what it accepts.
     fn input_with_help() -> CommandInput<'static> {
         let mut input = CommandInput::new(vec![]);
         input.update_commands(vec!["check_cpu".into(), "check_drivesize".into()]);
-        input.on_query_help(
-            "check_cpu".into(),
-            Some(QueryHelp {
-                name: "check_cpu".into(),
-                keyword_source: "check_cpu".into(),
-                parameters: vec![
-                    parameter("warning", "string", "none"),
-                    parameter("warn-on-error", "string", "none"),
-                    parameter("show-all", "bool", ""),
-                    parameter("critical", "string", "none"),
-                ],
-                fields: vec![],
-            }),
-        );
+        input.on_query_help("check_cpu", Some(sample_help()));
         input
     }
 
     #[test]
     fn command_being_argued_waits_for_the_space_after_the_name() {
         assert_eq!(command_being_argued("check_cpu"), None);
-        assert_eq!(command_being_argued("check_cpu "), Some("check_cpu".into()));
-        assert_eq!(
-            command_being_argued("check_cpu warn"),
-            Some("check_cpu".into())
-        );
+        assert_eq!(command_being_argued("check_cpu "), Some("check_cpu"));
+        assert_eq!(command_being_argued("check_cpu warn"), Some("check_cpu"));
         // `query <name>` names the query in the second word.
         assert_eq!(command_being_argued("query check_cpu"), None);
-        assert_eq!(
-            command_being_argued("query check_cpu "),
-            Some("check_cpu".into())
-        );
+        assert_eq!(command_being_argued("query check_cpu "), Some("check_cpu"));
         assert_eq!(command_being_argued(""), None);
+    }
+
+    #[test]
+    fn command_being_argued_survives_leading_and_multibyte_whitespace() {
+        // Leading whitespace used to be counted from the wrong place: the slice
+        // landed inside the word and reported "still typing the name", so help
+        // was never fetched for an indented line.
+        assert_eq!(command_being_argued("  check_cpu "), Some("check_cpu"));
+        assert_eq!(command_being_argued("\tcheck_cpu warn"), Some("check_cpu"));
+        assert_eq!(command_being_argued("  check_cpu"), None);
+        // And with a first character wider than a byte the same slice landed
+        // mid-character, which panics -- from a key handler, with the terminal
+        // in raw mode.
+        assert_eq!(command_being_argued("  ändern "), Some("ändern"));
+        assert_eq!(command_being_argued("ändern"), None);
+    }
+
+    #[test]
+    fn command_being_argued_reads_the_second_word_and_not_a_letter_of_the_first() {
+        // `split_once("e")` found the `e` inside `query`, so this never asked
+        // for help for a one-letter command name.
+        assert_eq!(command_being_argued("query e "), Some("e"));
+        assert_eq!(command_being_argued("query e"), None);
+        assert_eq!(command_being_argued("query r "), Some("r"));
+    }
+
+    #[test]
+    fn last_word_steps_over_a_whitespace_character_not_a_byte() {
+        assert_eq!(last_word("check_cpu warn"), "warn");
+        assert_eq!(last_word("check_cpu "), "");
+        assert_eq!(last_word("check_cpu"), "check_cpu");
+        // A non-breaking space is whitespace and is two bytes; stepping one
+        // byte lands inside it and panics. This is what a command pasted from
+        // a web page looks like.
+        assert_eq!(last_word("check_cpu\u{a0}warn"), "warn");
+    }
+
+    #[test]
+    fn tab_completes_a_whole_option_name_that_is_still_being_typed() {
+        let mut input = input_with_help();
+        // The word under the cursor is what Tab was asked to finish, so it must
+        // not count as already given -- this used to return nothing at all.
+        type_text(&mut input, "check_cpu critical");
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(input.get_state().value(), "check_cpu critical=");
+    }
+
+    #[test]
+    fn tab_completes_a_whole_switch_name_that_is_still_being_typed() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu show-all");
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(input.get_state().value(), "check_cpu show-all ");
+    }
+
+    #[test]
+    fn help_is_asked_for_a_command_name_typed_in_any_case() {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_cpu".into()]);
+        // The prompt accepts any case and so does the agent, so the cache has
+        // to as well or `Check_CPU` turns the prompt green and completes
+        // nothing.
+        type_text(&mut input, "Check_CPU ");
+        assert_eq!(input.take_help_request(), Some("Check_CPU".into()));
+
+        input.on_query_help("Check_CPU", Some(sample_help()));
+        // Answered under one spelling, found under another.
+        type_text(&mut input, "crit");
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(input.get_state().value(), "Check_CPU critical=");
+    }
+
+    #[test]
+    fn moving_between_two_commands_does_not_ask_about_each_one_again() {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_cpu".into(), "check_disk".into()]);
+
+        type_text(&mut input, "check_cpu ");
+        assert_eq!(input.take_help_request(), Some("check_cpu".into()));
+
+        input.set_input("check_disk ");
+        input.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(input.take_help_request(), Some("check_disk".into()));
+
+        // Back to the first: already asked, so not asked again.
+        input.set_input("check_cpu ");
+        input.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(input.take_help_request(), None);
+    }
+
+    #[test]
+    fn a_failed_ask_is_forgotten_so_the_next_keystroke_tries_again() {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_cpu".into()]);
+
+        type_text(&mut input, "check_cpu ");
+        assert_eq!(input.take_help_request(), Some("check_cpu".into()));
+
+        // A timeout says nothing about the query; remembering it would leave
+        // completion dead for the rest of the session.
+        input.forget_query_help("check_cpu");
+        type_text(&mut input, "w");
+        assert_eq!(input.take_help_request(), Some("check_cpu".into()));
     }
 
     #[test]
@@ -930,7 +1073,7 @@ mod tests {
     fn tab_does_nothing_for_a_query_the_agent_could_not_describe() {
         let mut input = CommandInput::new(vec![]);
         input.update_commands(vec!["check_cpu".into()]);
-        input.on_query_help("check_cpu".into(), None);
+        input.on_query_help("check_cpu", None);
         type_text(&mut input, "check_cpu w");
         assert_eq!(input.complete(), Completion::Nothing);
         assert_eq!(input.get_state().value(), "check_cpu w");

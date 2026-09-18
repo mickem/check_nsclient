@@ -263,8 +263,18 @@ mod tests {
         // The two halves stay apart, and the value keeps its native type.
         assert_eq!(parsed["metrics"]["workers.jobs"], 1847);
         assert_eq!(parsed["metadata"]["workers.jobs"]["type"], "counter");
-        // A field the producer never declared is not invented.
-        assert!(parsed["metadata"]["workers.jobs"]["unit"].is_null());
+        // A field the producer never declared is left out, not sent as null.
+        // Indexing would answer `null` either way, so the key itself is what
+        // has to be checked: json is meant to echo what the agent sent.
+        let described = parsed["metadata"]["workers.jobs"].as_object().unwrap();
+        assert!(!described.contains_key("unit"), "{described:?}");
+        assert!(!described.contains_key("help"), "{described:?}");
+        assert!(!described.contains_key("labels"), "{described:?}");
+        assert_eq!(
+            described.len(),
+            1,
+            "only the type it declared: {described:?}"
+        );
     }
 
     #[tokio::test]

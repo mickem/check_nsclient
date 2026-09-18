@@ -91,12 +91,16 @@ pub struct MetricDescription {
     /// `gauge`, `counter`, `unknown`, `info`, `summary` or `histogram`.
     #[serde(rename = "type")]
     pub metric_type: String,
-    #[serde(default)]
+    // Left out again when the agent left them out. json and yaml are supposed
+    // to echo the document as it arrived, and serializing `null` would invent
+    // three keys the agent never sent -- for a metric published through the
+    // bare `add_metric()` shorthand, on every one of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     /// Set where the metric is measured per instance, e.g. `{"core": "0"}`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<HashMap<String, String>>,
 }
 

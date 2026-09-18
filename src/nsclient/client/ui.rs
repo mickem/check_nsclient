@@ -1,6 +1,6 @@
 use crate::config::{load_history, store_history};
 use crate::nsclient::client::command_input::{CommandInput, CommandType, Completion};
-use crate::nsclient::client::events::{UICommand, UIEvent};
+use crate::nsclient::client::events::{QueryHelpAnswer, UICommand, UIEvent};
 use crate::nsclient::client::log_widget::{LogRecord, LogWidget};
 use crate::nsclient::client::status_widget::StatusWidget;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -71,9 +71,13 @@ impl UI<'_> {
             UIEvent::Commands(commands) => {
                 self.command.update_commands(commands);
             }
-            UIEvent::QueryHelp(command, help) => {
-                self.command.on_query_help(command, *help);
-            }
+            UIEvent::QueryHelp(command, answer) => match answer {
+                QueryHelpAnswer::Described(help) => {
+                    self.command.on_query_help(&command, Some(*help))
+                }
+                QueryHelpAnswer::Nothing => self.command.on_query_help(&command, None),
+                QueryHelpAnswer::Failed => self.command.forget_query_help(&command),
+            },
             UIEvent::Performance(user, kernel, memory) => {
                 self.status.on_performance(user, kernel, memory)
             }

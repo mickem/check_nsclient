@@ -453,8 +453,9 @@ pub enum MetricsCommand {
         /// labels -- read from the same snapshot as the values
         #[arg(short, long)]
         meta: bool,
-        /// Show all information (same as --output-long)
-        #[arg(short, long)]
+        /// Show the labels and help text too (only the described listing has
+        /// columns to reveal, so this needs --meta)
+        #[arg(short, long, requires = "meta")]
         long: bool,
     },
     /// Dump metrics in the OpenMetrics/Prometheus text exposition format

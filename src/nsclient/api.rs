@@ -182,13 +182,46 @@ impl ApiClient {
     where
         F: Fn(RequestBuilder) -> RequestBuilder,
     {
+        let response = self.send_unchecked(method, path, &configure).await?;
+        Self::check_status(response, path).await
+    }
+
+    /// `GET path`, with `404` answered as `Ok(None)`.
+    ///
+    /// For an endpoint where "there is nothing here" is an answer rather than a
+    /// failure, so a caller can tell it apart from a timeout without reading it
+    /// back out of an error message.
+    async fn get_json_optional<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> anyhow::Result<Option<T>> {
+        let response = self.send_unchecked(Method::GET, path, &|b| b).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = Self::check_status(response, path).await?;
+        Self::parse_json(response, path).await.map(Some)
+    }
+
+    /// The transport half of [`ApiClient::send`]: refresh the token and retry
+    /// once if the credentials are rejected, then hand the response back with
+    /// its status still unexamined.
+    async fn send_unchecked<F>(
+        &self,
+        method: Method,
+        path: &str,
+        configure: &F,
+    ) -> anyhow::Result<Response>
+    where
+        F: Fn(RequestBuilder) -> RequestBuilder,
+    {
         debug::log(1, format!("{method} {}", self.url_for(path)));
         let response = configure(self.authed_request(method.clone(), path)?)
             .send()
             .await?;
         debug::log(1, format!("{} from {path}", response.status()));
         if !Self::is_auth_failure(response.status()) {
-            return Self::check_status(response, path).await;
+            return Ok(response);
         }
         let status = response.status();
         debug::log(1, "Credentials rejected, trying to refresh the token");
@@ -204,7 +237,7 @@ impl ApiClient {
                 response.status()
             );
         }
-        Self::check_status(response, path).await
+        Ok(response)
     }
 
     async fn check_status(response: Response, path: &str) -> anyhow::Result<Response> {
@@ -276,7 +309,12 @@ pub trait ApiClientApi: Send + Sync {
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
     /// Everything a check accepts: every option with its default and its
     /// description, and every filter keyword it offers.
-    async fn get_query_help(&self, id: &str) -> anyhow::Result<QueryHelp>;
+    ///
+    /// `Ok(None)` is the agent answering 404 -- an unknown query, or an agent
+    /// from before the endpoint existed. That is a fact about the query and
+    /// worth remembering; an `Err` is a request that went wrong and may not go
+    /// wrong again.
+    async fn get_query_help(&self, id: &str) -> anyhow::Result<Option<QueryHelp>>;
     async fn execute_query(
         &self,
         id: &str,
@@ -447,8 +485,9 @@ impl ApiClientApi for ApiClient {
         self.get_json(&format!("api/v2/queries/{id}")).await
     }
 
-    async fn get_query_help(&self, id: &str) -> anyhow::Result<QueryHelp> {
-        self.get_json(&format!("api/v2/queries/{id}/help")).await
+    async fn get_query_help(&self, id: &str) -> anyhow::Result<Option<QueryHelp>> {
+        self.get_json_optional(&format!("api/v2/queries/{id}/help"))
+            .await
     }
 
     async fn execute_query(
@@ -656,7 +695,7 @@ pub mod mocks {
             async fn list_queries(&self, all: &bool) -> anyhow::Result<Vec<ListQueriesResult>>;
             async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
             async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
-            async fn get_query_help(&self, id: &str) -> anyhow::Result<QueryHelp>;
+            async fn get_query_help(&self, id: &str) -> anyhow::Result<Option<QueryHelp>>;
             async fn execute_query(
                 &self,
                 id: &str,
@@ -1616,7 +1655,11 @@ Common option for all filter checks."
             .await;
 
         let api = token_client(&server.uri(), "secret", None);
-        let help = api.get_query_help("check_drivesize").await.unwrap();
+        let help = api
+            .get_query_help("check_drivesize")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(help.name, "check_drivesize");
         assert_eq!(help.keyword_source, "check_drivesize");
         assert_eq!(help.parameters.len(), 2);
@@ -1644,11 +1687,40 @@ Common option for all filter checks."
             .await;
 
         let api = token_client(&server.uri(), "secret", None);
-        let help = api.get_query_help("check_ok").await.unwrap();
+        let help = api.get_query_help("check_ok").await.unwrap().unwrap();
         assert!(help.fields.is_empty());
         // An alias reports the command its keywords would have come from.
         assert_eq!(help.keyword_source, "check_ok");
         assert_eq!(help.name, "alias_ok");
+    }
+
+    #[tokio::test]
+    async fn query_help_reports_a_404_as_nothing_rather_than_as_a_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/nope/help"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Document not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        // An unknown query, or an agent without the endpoint: a fact about the
+        // query, and a caller is meant to be able to tell it from a timeout.
+        assert!(api.get_query_help("nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn query_help_still_reports_a_real_failure_as_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/queries/check_cpu/help"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        assert!(api.get_query_help("check_cpu").await.is_err());
     }
 
     #[tokio::test]

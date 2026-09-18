@@ -28,21 +28,24 @@ pub async fn route_query_commands(
             Err(e) => anyhow::bail!("Failed to fetch query {id}: {:#}", e),
         },
         &QueriesCommand::Describe { id, long } => match api.get_query_help(id).await {
-            Ok(help) => {
+            Ok(Some(help)) => {
                 render_help(&output, &help, long)?;
                 Ok(0)
             }
+            // The agent answered, and what it said was "nothing here". It
+            // cannot tell an unknown query from an agent without the endpoint,
+            // but `queries show` answers on both.
+            Ok(None) => anyhow::bail!(
+                concat!(
+                    "Nothing to describe for query {id}: either no such query, ",
+                    "or an agent without the endpoint. `queries show {id}` ",
+                    "works on both."
+                ),
+                id = id
+            ),
             // A 404 here is ambiguous: the query may not exist, or the agent
             // may predate the endpoint. `queries show` answers on both.
-            Err(e) => anyhow::bail!(
-                concat!(
-                    "Failed to fetch help for query {id}: {error:#} ",
-                    "(a 404 means either an unknown query or an agent without ",
-                    "this endpoint; `queries show {id}` works on both)"
-                ),
-                id = id,
-                error = e
-            ),
+            Err(e) => anyhow::bail!("Failed to fetch help for query {id}: {:#}", e),
         },
         &QueriesCommand::Execute { id, args } => match api.execute_query(id, args).await {
             Ok(result) => {
@@ -83,25 +86,31 @@ fn render_help(output: &Rendering, help: &QueryHelp, long: &bool) -> anyhow::Res
     if !output.is_flat() {
         return output.render_nested_single(help);
     }
-    // Only text gets the headings: they would be stray rows in a csv.
-    if output.is_text() {
-        output.print(&format!("Options for {}:", help.name));
+    // Two tables with different columns cannot share one csv: the second set of
+    // headers would arrive mid-file and every reader would choke on it. Refused
+    // rather than written out wrong, the way the nested renderers refuse text.
+    if !output.is_text() {
+        anyhow::bail!(
+            "csv cannot hold both halves of this answer (the options and the filter keywords              are different shapes); use --output json or --output yaml"
+        );
     }
+    output.print(&format!("Options for {}:", help.name));
     output.render_rows(&help.parameters, long, &["details"])?;
-    if output.is_text() {
-        // An alias declares no keywords of its own -- the list belongs to the
-        // command it stands for, and saying so is the difference between "this
-        // check has none" and "look at that one instead".
-        let source = if help.keyword_source.is_empty() || help.keyword_source == help.name {
-            String::new()
-        } else {
-            format!(" (from {})", help.keyword_source)
-        };
-        output.print(&format!("\nFilter keywords{source}:"));
-        if help.fields.is_empty() {
-            output.print("  none: this check is not filter based.");
-            return Ok(());
-        }
+    // An alias declares no keywords of its own -- the list belongs to the
+    // command it stands for, and saying so is the difference between "this
+    // check has none" and "look at that one instead".
+    let source = if help.keyword_source.is_empty() || help.keyword_source == help.name {
+        String::new()
+    } else {
+        format!(" (from {})", help.keyword_source)
+    };
+    output.print(&format!(
+        "
+Filter keywords{source}:"
+    ));
+    if help.fields.is_empty() {
+        output.print("  none: this check is not filter based.");
+        return Ok(());
     }
     output.render_rows(&help.fields, long, &["details"])
 }
@@ -257,11 +266,11 @@ Even the boring ones."
         api.expect_get_query_help()
             .withf(|id| id == "check_drivesize")
             .returning(|_| {
-                Ok(sample_help(
+                Ok(Some(sample_help(
                     "check_drivesize",
                     "check_drivesize",
                     free_space(),
-                ))
+                )))
             });
         let (output, out) = rendering(OutputFormat::Text);
 
@@ -292,11 +301,11 @@ Even the boring ones."
     async fn describe_long_reveals_the_full_descriptions() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_get_query_help().returning(|_| {
-            Ok(sample_help(
+            Ok(Some(sample_help(
                 "check_drivesize",
                 "check_drivesize",
                 free_space(),
-            ))
+            )))
         });
         let (output, out) = rendering(OutputFormat::Text);
 
@@ -321,8 +330,13 @@ Even the boring ones."
     #[tokio::test]
     async fn describe_names_the_command_an_alias_borrows_its_keywords_from() {
         let mut api = MockApiClientApiImpl::new();
-        api.expect_get_query_help()
-            .returning(|_| Ok(sample_help("alias_disk", "check_drivesize", free_space())));
+        api.expect_get_query_help().returning(|_| {
+            Ok(Some(sample_help(
+                "alias_disk",
+                "check_drivesize",
+                free_space(),
+            )))
+        });
         let (output, out) = rendering(OutputFormat::Text);
 
         route_query_commands(
@@ -348,7 +362,7 @@ Even the boring ones."
     async fn describe_says_so_when_a_check_is_not_filter_based() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_get_query_help()
-            .returning(|_| Ok(sample_help("check_ok", "check_ok", vec![])));
+            .returning(|_| Ok(Some(sample_help("check_ok", "check_ok", vec![]))));
         let (output, out) = rendering(OutputFormat::Text);
 
         route_query_commands(
@@ -374,11 +388,11 @@ Even the boring ones."
     async fn describe_json_keeps_the_two_halves_apart() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_get_query_help().returning(|_| {
-            Ok(sample_help(
+            Ok(Some(sample_help(
                 "check_drivesize",
                 "check_drivesize",
                 free_space(),
-            ))
+            )))
         });
         let (output, out) = rendering(OutputFormat::Json);
 
@@ -416,12 +430,59 @@ Even the boring ones."
         )
         .await
         .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Failed to fetch help for query check_cpu: boom"
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_reports_a_query_the_agent_has_nothing_to_say_about() {
+        let mut api = MockApiClientApiImpl::new();
+        // `Ok(None)` is the agent's 404, which is an answer rather than a
+        // failure and reads differently from one.
+        api.expect_get_query_help().returning(|_| Ok(None));
+        let (output, _) = rendering(OutputFormat::Text);
+
+        let err = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_cpu".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string()
-                .starts_with("Failed to fetch help for query check_cpu: boom"),
+                .starts_with("Nothing to describe for query check_cpu"),
             "{err}"
         );
         assert!(err.to_string().contains("queries show check_cpu"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn describe_refuses_csv_rather_than_writing_two_headers_into_one_file() {
+        let mut api = MockApiClientApiImpl::new();
+        api.expect_get_query_help()
+            .returning(|_| Ok(Some(sample_help("check_cpu", "check_cpu", free_space()))));
+        let (output, _) = rendering(OutputFormat::Csv);
+
+        let err = route_query_commands(
+            output,
+            Box::new(api),
+            &QueriesCommand::Describe {
+                id: "check_cpu".into(),
+                long: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("csv cannot hold both halves"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
