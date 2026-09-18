@@ -159,6 +159,15 @@ impl BackendProxy {
                     anyhow::bail!("Exit should not be sent to API");
                 }
             },
+            // A query with no help is not an error the user needs to see: an
+            // agent that predates the endpoint answers 404 for every command,
+            // and saying so once per command would be all they saw.
+            UICommand::DescribeQuery(name) => {
+                let help = self.api.get_query_help(&name).await.ok();
+                self.send_or_error(UIEvent::QueryHelp(name, Box::new(help)))
+                    .await;
+                Ok(())
+            }
         }
     }
 

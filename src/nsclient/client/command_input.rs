@@ -1,3 +1,4 @@
+use crate::nsclient::messages::QueryHelp;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tui_prompts::FocusState::Focused;
 use tui_prompts::{State, TextState};
@@ -71,6 +72,19 @@ pub struct Command {
     pub command: CommandType,
 }
 
+/// What pressing Tab did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Completion {
+    /// Nothing to complete against, or nothing matched: the input is unchanged.
+    Nothing,
+    /// The input was extended -- to the single match, or to the prefix every
+    /// match shares.
+    Extended,
+    /// Several things match and they share no longer prefix, so the caller
+    /// shows them and lets the user pick.
+    Candidates(Vec<String>),
+}
+
 #[derive(Debug)]
 pub struct CommandInput<'a> {
     command_state: TextState<'a>,
@@ -80,6 +94,20 @@ pub struct CommandInput<'a> {
     /// The text that was being typed before the user started browsing history with Up/Down;
     /// restored when browsing past the most recent entry.
     draft: Option<String>,
+    /// What the query currently being typed accepts, as the agent described it.
+    ///
+    /// Keyed by command name and holding `None` for a query the agent could not
+    /// describe, so a command without help is asked about once rather than on
+    /// every keystroke.
+    help: Option<(String, Option<QueryHelp>)>,
+    /// A command whose help the UI should go and fetch. Taken by the caller,
+    /// which is the side that can talk to the agent.
+    wanted_help: Option<String>,
+    /// The command help has been asked about, remembered separately from
+    /// `wanted_help` because that is emptied as soon as the UI picks the
+    /// request up -- long before the answer comes back. Without it every
+    /// keystroke in the gap would ask again.
+    asked_about: Option<String>,
 }
 
 impl<'a> CommandInput<'a> {
@@ -90,7 +118,21 @@ impl<'a> CommandInput<'a> {
             history,
             history_index: None,
             draft: None,
+            help: None,
+            wanted_help: None,
+            asked_about: None,
         }
+    }
+
+    /// The command whose help the UI should fetch, if any. Clears on read, so
+    /// each command name is asked about once.
+    pub fn take_help_request(&mut self) -> Option<String> {
+        self.wanted_help.take()
+    }
+
+    /// Record what the agent said a query accepts (or could not say).
+    pub fn on_query_help(&mut self, command: String, help: Option<QueryHelp>) {
+        self.help = Some((command, help));
     }
 
     pub(crate) fn get_history(&self) -> Vec<String> {
@@ -280,6 +322,88 @@ impl<'a> CommandInput<'a> {
             }
             _ => self.set_status_error(),
         }
+        self.note_help_needed();
+    }
+
+    /// Ask for a query's vocabulary once the user starts on its arguments.
+    ///
+    /// Waiting for the space after the command name means one request per
+    /// command rather than one per keystroke while the name is still being
+    /// typed, and it is exactly the point where completing an argument starts
+    /// to be worth anything.
+    fn note_help_needed(&mut self) {
+        let value = self.command_state.value();
+        let Some(command) = command_being_argued(value) else {
+            return;
+        };
+        // Already answered, or already asked and still waiting.
+        if self.help.as_ref().is_some_and(|(name, _)| *name == command)
+            || self.asked_about.as_deref() == Some(command.as_str())
+        {
+            return;
+        }
+        if !self.available_commands.contains(&command) {
+            return;
+        }
+        self.asked_about = Some(command.clone());
+        self.wanted_help = Some(command);
+    }
+
+    /// Complete the word at the end of the input.
+    ///
+    /// Completion works on the end of the line rather than at the cursor: this
+    /// is a prompt, the cursor is at the end whenever someone is typing, and
+    /// the alternative is splicing text mid-value for a case that does not
+    /// arise.
+    pub fn complete(&mut self) -> Completion {
+        let value = self.command_state.value().to_owned();
+        let partial = last_word(&value);
+
+        let candidates = match command_being_argued(&value) {
+            // Still on the first word: the commands themselves.
+            None => self
+                .available_commands
+                .iter()
+                .map(String::as_str)
+                .chain(VALID_COMMANDS.iter().copied())
+                .filter(|name| name.starts_with(partial))
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+            // Past it: what the agent said this query accepts.
+            Some(command) => {
+                let Some((name, Some(help))) = &self.help else {
+                    return Completion::Nothing;
+                };
+                if *name != command {
+                    return Completion::Nothing;
+                }
+                help.parameters
+                    .iter()
+                    .filter(|p| p.name.starts_with(partial))
+                    // An option already on the line is not offered again,
+                    // unless the check says it may be repeated.
+                    .filter(|p| p.repeatable || !argument_already_given(&value, &p.name))
+                    .map(suggest_argument)
+                    .collect()
+            }
+        };
+
+        self.apply(&value, partial, candidates)
+    }
+
+    /// Put a completion in, or report back what the user has to choose between.
+    fn apply(&mut self, value: &str, partial: &str, candidates: Vec<String>) -> Completion {
+        let Some(shared) = shared_prefix(&candidates) else {
+            return Completion::Nothing;
+        };
+        // A single match completes outright; several extend only as far as they
+        // agree, and if they agree on nothing more the user has to choose.
+        if candidates.len() > 1 && shared.len() == partial.len() {
+            return Completion::Candidates(candidates);
+        }
+        let head = &value[..value.len() - partial.len()];
+        self.set_input(&format!("{head}{shared}"));
+        Completion::Extended
     }
 
     pub fn handle_help(&mut self) -> Vec<String> {
@@ -294,8 +418,82 @@ impl<'a> CommandInput<'a> {
             "  modules: Show and manipulate modules".into(),
             "  queries: List all available queries (check commands)".into(),
             "  ...      Any query (check command) can be executed as-is".into(),
+            "".into(),
+            "Tab completes a command name, and -- once you are past it -- the".into(),
+            "options that check accepts, as the agent describes them.".into(),
         ]
     }
+}
+
+/// The command whose arguments are being typed, if the input has moved past
+/// the command name.
+///
+/// `check_cpu` is still the name being typed; `check_cpu ` and `check_cpu w`
+/// are arguments to `check_cpu`. A built-in such as `query check_cpu ` names
+/// the query in the second word instead.
+fn command_being_argued(value: &str) -> Option<String> {
+    let mut words = value.split_whitespace();
+    let first = words.next()?;
+    // Nothing after the first word yet: it is still the command name.
+    if !value[first.len()..].starts_with(char::is_whitespace) {
+        return None;
+    }
+    if first.eq_ignore_ascii_case("query") {
+        let second = words.next()?;
+        let after = value.split_once(second)?.1;
+        return after
+            .starts_with(char::is_whitespace)
+            .then(|| second.to_owned());
+    }
+    Some(first.to_owned())
+}
+
+/// The partial word Tab should complete: what follows the last space.
+fn last_word(value: &str) -> &str {
+    match value.rfind(char::is_whitespace) {
+        Some(at) => &value[at + 1..],
+        None => value,
+    }
+}
+
+/// Is this option already on the line?
+fn argument_already_given(value: &str, name: &str) -> bool {
+    value
+        .split_whitespace()
+        .skip(1)
+        .any(|word| word == name || word.split_once('=').is_some_and(|(key, _)| key == name))
+}
+
+/// How an option should be offered.
+///
+/// Checks declare their flags so that REST can pass `show-all=true`, and a bare
+/// `show-all` is refused with *does not take any arguments* -- so an option is
+/// suggested with its `=` already there. The exception is a `bool` with no
+/// default, which is a plain switch (`help`, `show-default`) and takes no value
+/// at all; that one is offered with a trailing space instead.
+fn suggest_argument(parameter: &crate::nsclient::messages::QueryParameter) -> String {
+    if parameter.content_type == "bool" && parameter.default_value.is_empty() {
+        format!("{} ", parameter.name)
+    } else {
+        format!("{}=", parameter.name)
+    }
+}
+
+/// The longest prefix every candidate shares, or `None` if there are none.
+fn shared_prefix(candidates: &[String]) -> Option<String> {
+    let first = candidates.first()?;
+    let mut length = first.len();
+    for other in &candidates[1..] {
+        length = length.min(
+            first
+                .char_indices()
+                .zip(other.char_indices())
+                .take_while(|((_, a), (_, b))| a == b)
+                .last()
+                .map_or(0, |((i, c), _)| i + c.len_utf8()),
+        );
+    }
+    Some(first[..length].to_owned())
 }
 
 fn parse_command(tokens: &[String]) -> anyhow::Result<Command> {
@@ -437,6 +635,7 @@ fn tokenize_command(input: &str) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nsclient::messages::QueryParameter;
 
     #[test]
     fn command_input_tokenizer_handles_quotes() {
@@ -612,6 +811,153 @@ mod tests {
         assert!(parse_command(&tokens("history delete")).is_err());
         assert!(parse_command(&tokens("history delete x")).is_err());
         assert!(parse_command(&tokens("history bogus")).is_err());
+    }
+
+    fn parameter(name: &str, content_type: &str, default_value: &str) -> QueryParameter {
+        QueryParameter {
+            name: name.into(),
+            default_value: default_value.into(),
+            required: false,
+            repeatable: false,
+            content_type: content_type.into(),
+            short_description: String::new(),
+            long_description: String::new(),
+        }
+    }
+
+    /// An input that already knows `check_cpu` and what it accepts.
+    fn input_with_help() -> CommandInput<'static> {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_cpu".into(), "check_drivesize".into()]);
+        input.on_query_help(
+            "check_cpu".into(),
+            Some(QueryHelp {
+                name: "check_cpu".into(),
+                keyword_source: "check_cpu".into(),
+                parameters: vec![
+                    parameter("warning", "string", "none"),
+                    parameter("warn-on-error", "string", "none"),
+                    parameter("show-all", "bool", ""),
+                    parameter("critical", "string", "none"),
+                ],
+                fields: vec![],
+            }),
+        );
+        input
+    }
+
+    #[test]
+    fn command_being_argued_waits_for_the_space_after_the_name() {
+        assert_eq!(command_being_argued("check_cpu"), None);
+        assert_eq!(command_being_argued("check_cpu "), Some("check_cpu".into()));
+        assert_eq!(
+            command_being_argued("check_cpu warn"),
+            Some("check_cpu".into())
+        );
+        // `query <name>` names the query in the second word.
+        assert_eq!(command_being_argued("query check_cpu"), None);
+        assert_eq!(
+            command_being_argued("query check_cpu "),
+            Some("check_cpu".into())
+        );
+        assert_eq!(command_being_argued(""), None);
+    }
+
+    #[test]
+    fn shared_prefix_is_as_far_as_every_candidate_agrees() {
+        assert_eq!(shared_prefix(&[]), None);
+        assert_eq!(shared_prefix(&["only".into()]), Some("only".into()));
+        assert_eq!(
+            shared_prefix(&["warning".into(), "warn-on-error".into()]),
+            Some("warn".into())
+        );
+        assert_eq!(
+            shared_prefix(&["alpha".into(), "beta".into()]),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn tab_completes_a_command_name() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_d");
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(input.get_state().value(), "check_drivesize");
+    }
+
+    #[test]
+    fn tab_completes_an_option_and_leaves_the_cursor_after_its_equals() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu crit");
+        assert_eq!(input.complete(), Completion::Extended);
+        // An option takes a value on the wire, so the `=` comes with it.
+        assert_eq!(input.get_state().value(), "check_cpu critical=");
+    }
+
+    #[test]
+    fn tab_offers_a_bare_switch_without_an_equals() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu show");
+        assert_eq!(input.complete(), Completion::Extended);
+        // A bool with no default takes no value at all.
+        assert_eq!(input.get_state().value(), "check_cpu show-all ");
+    }
+
+    #[test]
+    fn tab_extends_to_what_the_matches_agree_on() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu w");
+        // `warning` and `warn-on-error` agree on `warn` and no further.
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(input.get_state().value(), "check_cpu warn");
+        // Pressing again has nothing left to add, so it shows the choice.
+        assert_eq!(
+            input.complete(),
+            Completion::Candidates(vec!["warning=".into(), "warn-on-error=".into()])
+        );
+        assert_eq!(input.get_state().value(), "check_cpu warn");
+    }
+
+    #[test]
+    fn tab_does_not_offer_an_option_that_is_already_on_the_line() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu critical=5 crit");
+        assert_eq!(input.complete(), Completion::Nothing);
+        assert_eq!(input.get_state().value(), "check_cpu critical=5 crit");
+    }
+
+    #[test]
+    fn tab_does_nothing_for_a_query_the_agent_could_not_describe() {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_cpu".into()]);
+        input.on_query_help("check_cpu".into(), None);
+        type_text(&mut input, "check_cpu w");
+        assert_eq!(input.complete(), Completion::Nothing);
+        assert_eq!(input.get_state().value(), "check_cpu w");
+    }
+
+    #[test]
+    fn help_is_asked_for_once_the_arguments_start_and_only_once() {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_cpu".into()]);
+
+        type_text(&mut input, "check_cpu");
+        assert_eq!(input.take_help_request(), None, "still typing the name");
+
+        type_text(&mut input, " ");
+        assert_eq!(input.take_help_request(), Some("check_cpu".into()));
+
+        // Taken once: the request is not repeated on every later keystroke.
+        type_text(&mut input, "war");
+        assert_eq!(input.take_help_request(), None);
+    }
+
+    #[test]
+    fn help_is_not_asked_for_something_that_is_not_a_query() {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_cpu".into()]);
+        type_text(&mut input, "modules list");
+        assert_eq!(input.take_help_request(), None);
     }
 
     fn type_text(input: &mut CommandInput, text: &str) {
