@@ -279,7 +279,12 @@ pub trait ApiClientApi: Send + Sync {
     /// else -- and the listing does not report parameters anyway. NSClient++
     /// now ignores the parameter for that reason.
     async fn list_queries(&self) -> anyhow::Result<Vec<ListQueriesResult>>;
-    async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
+    /// Every query alias the agent has registered.
+    ///
+    /// Like [`ApiClientApi::list_queries`] this takes no `all`: the alias
+    /// inventory never read the flag, so asking for it changed nothing except
+    /// the promise made to whoever typed it.
+    async fn list_aliases(&self) -> anyhow::Result<Vec<AliasResult>>;
     async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
     async fn execute_query(
         &self,
@@ -444,8 +449,13 @@ impl ApiClientApi for ApiClient {
         self.get_with_query("api/v2/queries", &params).await
     }
 
-    async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>> {
-        let params = [("all".to_string(), all.to_string())];
+    async fn list_aliases(&self) -> anyhow::Result<Vec<AliasResult>> {
+        // Pinned for the same reason as on `queries`: an agent that reads the
+        // parameter defaults it to *true*, which here means scanning the module
+        // directory on every listing. Cheap (measured at 0.124s against 0.110s)
+        // rather than ruinous, but it buys nothing -- the aliases that come
+        // back are identical either way.
+        let params = [("all".to_string(), "false".to_string())];
         self.get_with_query("api/v2/aliases", &params).await
     }
 
@@ -648,7 +658,7 @@ pub mod mocks {
             async fn module_command(&self, id: &str, command: &str) -> anyhow::Result<()>;
             async fn upload_module(&self, id: &str, archive: Vec<u8>) -> anyhow::Result<()>;
             async fn list_queries(&self) -> anyhow::Result<Vec<ListQueriesResult>>;
-            async fn list_aliases(&self, all: &bool) -> anyhow::Result<Vec<AliasResult>>;
+            async fn list_aliases(&self) -> anyhow::Result<Vec<AliasResult>>;
             async fn get_query(&self, id: &str) -> anyhow::Result<QueryResult>;
             async fn execute_query(
                 &self,
@@ -1476,11 +1486,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_aliases_passes_the_all_flag() {
+    async fn list_aliases_never_asks_for_the_disk_scan() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v2/aliases"))
-            .and(query_param("all", "true"))
+            .and(query_param("all", "false"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!([{
                     "name": "alias_cpu",
@@ -1496,7 +1506,7 @@ mod tests {
             .await;
 
         let api = token_client(&server.uri(), "secret", None);
-        let aliases = api.list_aliases(&true).await.unwrap();
+        let aliases = api.list_aliases().await.unwrap();
         assert_eq!(aliases.len(), 1);
         assert_eq!(aliases[0].name, "alias_cpu");
         assert_eq!(

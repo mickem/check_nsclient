@@ -936,9 +936,8 @@ fn aliases_list() {
     let long = client.text(&["aliases", "list", "--long"]);
     assert!(long.contains("description"), "{long}");
 
-    // An alias resolves through the regular queries flow.
-    let all = client.json(&["aliases", "list", "--all"]);
-    assert!(all.as_array().unwrap().len() >= list.len());
+    // There is no `--all` to exercise: the agent's alias inventory never read
+    // the flag, so it only ever promised something it did not do.
 }
 
 // ---------------------------------------------------------------------------

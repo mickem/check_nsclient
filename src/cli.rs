@@ -249,9 +249,6 @@ pub enum QueriesCommand {
 pub enum AliasesCommand {
     /// List aliases
     List {
-        /// List all aliases (including modules that are not loaded)
-        #[arg(short, long)]
-        all: bool,
         /// Show all information (same as --output-long)
         #[arg(short, long)]
         long: bool,

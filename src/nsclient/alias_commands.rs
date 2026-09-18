@@ -8,7 +8,7 @@ pub async fn route_alias_commands(
     command: &AliasesCommand,
 ) -> anyhow::Result<()> {
     match command {
-        AliasesCommand::List { all, long } => match api.list_aliases(all).await {
+        AliasesCommand::List { long } => match api.list_aliases().await {
             Ok(aliases) => output.render_rows(&aliases, long, &["description"]),
             Err(e) => anyhow::bail!("Failed to fetch aliases: {:#}", e),
         },
@@ -50,21 +50,12 @@ mod tests {
     #[tokio::test]
     async fn list_text_hides_the_description_by_default() {
         let mut api = MockApiClientApiImpl::new();
-        api.expect_list_aliases()
-            .withf(|all| !*all)
-            .returning(|_| Ok(vec![sample()]));
+        api.expect_list_aliases().returning(|| Ok(vec![sample()]));
         let (output, out) = rendering(OutputFormat::Text);
 
-        route_alias_commands(
-            output,
-            Box::new(api),
-            &AliasesCommand::List {
-                all: false,
-                long: false,
-            },
-        )
-        .await
-        .unwrap();
+        route_alias_commands(output, Box::new(api), &AliasesCommand::List { long: false })
+            .await
+            .unwrap();
 
         assert_eq!(
             out.borrow().as_str(),
@@ -75,23 +66,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_long_shows_the_description_and_passes_all() {
+    async fn list_long_shows_the_description() {
         let mut api = MockApiClientApiImpl::new();
-        api.expect_list_aliases()
-            .withf(|all| *all)
-            .returning(|_| Ok(vec![sample()]));
+        api.expect_list_aliases().returning(|| Ok(vec![sample()]));
         let (output, out) = rendering(OutputFormat::Text);
 
-        route_alias_commands(
-            output,
-            Box::new(api),
-            &AliasesCommand::List {
-                all: true,
-                long: true,
-            },
-        )
-        .await
-        .unwrap();
+        route_alias_commands(output, Box::new(api), &AliasesCommand::List { long: true })
+            .await
+            .unwrap();
 
         assert!(
             out.borrow().contains("Alias for: check_cpu"),
@@ -103,19 +85,12 @@ mod tests {
     #[tokio::test]
     async fn list_json_keeps_the_query_url_and_metadata() {
         let mut api = MockApiClientApiImpl::new();
-        api.expect_list_aliases().returning(|_| Ok(vec![sample()]));
+        api.expect_list_aliases().returning(|| Ok(vec![sample()]));
         let (output, out) = rendering(OutputFormat::Json);
 
-        route_alias_commands(
-            output,
-            Box::new(api),
-            &AliasesCommand::List {
-                all: false,
-                long: false,
-            },
-        )
-        .await
-        .unwrap();
+        route_alias_commands(output, Box::new(api), &AliasesCommand::List { long: false })
+            .await
+            .unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&out.borrow()).unwrap();
         assert_eq!(parsed[0]["name"], "alias_cpu");
@@ -129,20 +104,13 @@ mod tests {
     #[tokio::test]
     async fn list_error_is_reported() {
         let mut api = MockApiClientApiImpl::new();
-        api.expect_list_aliases()
-            .returning(|_| Err(anyhow!("boom")));
+        api.expect_list_aliases().returning(|| Err(anyhow!("boom")));
         let (output, _) = rendering(OutputFormat::Text);
 
-        let err = route_alias_commands(
-            output,
-            Box::new(api),
-            &AliasesCommand::List {
-                all: false,
-                long: false,
-            },
-        )
-        .await
-        .unwrap_err();
+        let err =
+            route_alias_commands(output, Box::new(api), &AliasesCommand::List { long: false })
+                .await
+                .unwrap_err();
         assert_eq!(err.to_string(), "Failed to fetch aliases: boom");
     }
 }
