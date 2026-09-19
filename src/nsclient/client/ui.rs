@@ -1,5 +1,7 @@
 use crate::config::{load_history, store_history};
-use crate::nsclient::client::command_input::{CommandInput, CommandType, Completion};
+use crate::nsclient::client::command_input::{
+    CommandInput, CommandType, Completion, candidate_lines,
+};
 use crate::nsclient::client::events::{QueryHelpAnswer, UICommand, UIEvent};
 use crate::nsclient::client::log_widget::{LogRecord, LogWidget};
 use crate::nsclient::client::status_widget::StatusWidget;
@@ -144,7 +146,11 @@ impl UI<'_> {
     fn complete(&mut self) {
         match self.command.complete() {
             Completion::Nothing | Completion::Extended => {}
-            Completion::Candidates(candidates) => self.output(&candidates.join("  ")),
+            Completion::Candidates(candidates) => {
+                for line in candidate_lines(&candidates) {
+                    self.output(&line);
+                }
+            }
         }
     }
 

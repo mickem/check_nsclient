@@ -83,7 +83,33 @@ pub enum Completion {
     Extended,
     /// Several things match and they share no longer prefix, so the caller
     /// shows them and lets the user pick.
-    Candidates(Vec<String>),
+    Candidates(Vec<Suggestion>),
+}
+
+/// One thing Tab could put in, and what the agent says it is for.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Suggestion {
+    /// The text that goes in, `=` and all.
+    pub text: String,
+    /// The agent's summary line for it, empty when it sent none.
+    pub description: String,
+}
+
+impl Suggestion {
+    fn described(text: impl Into<String>, description: String) -> Self {
+        Self {
+            text: text.into(),
+            description,
+        }
+    }
+
+    /// For something the agent says nothing about, such as a command name.
+    fn bare(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            description: String::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -377,43 +403,74 @@ impl<'a> CommandInput<'a> {
     /// arise.
     pub fn complete(&mut self) -> Completion {
         let value = self.command_state.value().to_owned();
-        let partial = last_word(&value);
+        let (partial, candidates) = self.candidates(&value);
+        self.apply(&value, partial, candidates)
+    }
 
-        // Everything before the word being completed. The word itself is what
-        // Tab was asked to finish, so it is never treated as already given.
-        let settled = &value[..value.len() - partial.len()];
-
-        let candidates = match command_being_argued(&value) {
-            // Still on the first word: the commands themselves.
-            None => self
+    /// What Tab could put in at the end of `value`, and the text it replaces.
+    ///
+    /// That text is the word being completed, except inside a filter
+    /// expression, where it is the keyword being typed within the value rather
+    /// than the whole `filter=...` word.
+    fn candidates<'v>(&self, value: &'v str) -> (&'v str, Vec<Suggestion>) {
+        // Still on the first word: the commands themselves.
+        let Some(command) = command_being_argued(value) else {
+            let partial = last_word(value);
+            let candidates = self
                 .available_commands
                 .iter()
                 .map(String::as_str)
                 .chain(VALID_COMMANDS.iter().copied())
                 .filter(|name| name.starts_with(partial))
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-            // Past it: what the agent said this query accepts.
-            Some(command) => {
-                let Some(Some(help)) = self.help.get(&help_key(command)) else {
-                    return Completion::Nothing;
-                };
-                help.parameters
-                    .iter()
-                    .filter(|p| p.name.starts_with(partial))
-                    // An option already settled on the line is not offered
-                    // again, unless the check says it may be repeated.
-                    .filter(|p| p.repeatable || !argument_already_given(settled, &p.name))
-                    .map(suggest_argument)
-                    .collect()
-            }
+                .map(Suggestion::bare)
+                .collect();
+            return (partial, candidates);
         };
-
-        self.apply(&value, partial, candidates)
+        // Past it: what the agent said this query accepts.
+        let Some(Some(help)) = self.help.get(&help_key(command)) else {
+            return (last_word(value), Vec::new());
+        };
+        // A filter expression is written in the check's keywords, so inside one
+        // they are the vocabulary and its options are not.
+        if let Some(keyword) = filter_keyword_being_typed(value) {
+            let candidates = help
+                .fields
+                .iter()
+                // A keyword may be named twice in one expression, so unlike an
+                // option, one already on the line is still offered.
+                .filter(|field| field.name.starts_with(keyword))
+                .map(|field| {
+                    Suggestion::described(
+                        &field.name,
+                        summary(&field.short_description, &field.long_description),
+                    )
+                })
+                .collect();
+            return (keyword, candidates);
+        }
+        let partial = last_word(value);
+        // Everything before the word being completed. The word itself is what
+        // Tab was asked to finish, so it is never treated as already given.
+        let settled = &value[..value.len() - partial.len()];
+        let candidates = help
+            .parameters
+            .iter()
+            .filter(|p| p.name.starts_with(partial))
+            // An option already settled on the line is not offered again,
+            // unless the check says it may be repeated.
+            .filter(|p| p.repeatable || !argument_already_given(settled, &p.name))
+            .map(|p| {
+                Suggestion::described(
+                    suggest_argument(p),
+                    summary(&p.short_description, &p.long_description),
+                )
+            })
+            .collect();
+        (partial, candidates)
     }
 
     /// Put a completion in, or report back what the user has to choose between.
-    fn apply(&mut self, value: &str, partial: &str, candidates: Vec<String>) -> Completion {
+    fn apply(&mut self, value: &str, partial: &str, candidates: Vec<Suggestion>) -> Completion {
         let Some(shared) = shared_prefix(&candidates) else {
             return Completion::Nothing;
         };
@@ -441,7 +498,9 @@ impl<'a> CommandInput<'a> {
             "  ...      Any query (check command) can be executed as-is".into(),
             "".into(),
             "Tab completes a command name, and -- once you are past it -- the".into(),
-            "options that check accepts, as the agent describes them.".into(),
+            "options that check accepts, as the agent describes them. Inside".into(),
+            "filter=, warning=, critical= and ok= it completes the filter".into(),
+            "keywords the check offers instead.".into(),
         ]
     }
 }
@@ -509,6 +568,123 @@ fn argument_already_given(settled: &str, name: &str) -> bool {
         .any(|word| word == name || word.split_once('=').is_some_and(|(key, _)| key == name))
 }
 
+/// The options whose value is a filter expression rather than a plain value.
+///
+/// Nothing in the agent's answer marks them out -- `help` types every one of
+/// them as a `string` -- so the set is the one NSClient++'s filter framework
+/// adds to every filter based check: the selector, the three state filters, and
+/// the two abbreviations the agent also accepts for them. `empty-state` is not
+/// one of them; it takes a state, not an expression.
+const FILTER_EXPRESSION_OPTIONS: &[&str] = &["filter", "warning", "warn", "critical", "crit", "ok"];
+
+/// The filter keyword being typed at the end of `value`, if that is where the
+/// line ends.
+///
+/// `filter=st` is asking about `state`, not about another option, so this is
+/// what tells the two vocabularies apart. A filter expression holds spaces and
+/// is therefore usually quoted, which is why this walks the line rather than
+/// looking at its last word: inside an unclosed quote the keyword after an `and`
+/// is still part of the `filter=` value.
+///
+/// `None` when the line does not end in such a value at all, and when it ends
+/// inside a string literal (`filter="state = 'run`), where what comes next is
+/// the rest of the literal rather than a keyword. The keyword itself is empty
+/// where the expression ends on an operator or a space, which offers the lot.
+fn filter_keyword_being_typed(value: &str) -> Option<&str> {
+    // The option whose value the walk is inside, and where that value starts.
+    let mut option: Option<(&str, usize)> = None;
+    let mut word_start = 0;
+    let mut quoted = false;
+    for (at, c) in value.char_indices() {
+        if c == '"' {
+            quoted = !quoted;
+        } else if c.is_whitespace() && !quoted {
+            // The word ended, so whatever it was assigning ended with it.
+            option = None;
+            word_start = at + c.len_utf8();
+        } else if c == '=' && option.is_none() {
+            // The first `=` of a word divides it; later ones belong to the
+            // expression (`filter=state=='x'`).
+            option = Some((&value[word_start..at], at + 1));
+        }
+    }
+    let (name, start) = option?;
+    if !FILTER_EXPRESSION_OPTIONS
+        .iter()
+        .any(|known| name.eq_ignore_ascii_case(known))
+    {
+        return None;
+    }
+    let expression = &value[start..];
+    // An odd number of `'` leaves the line inside a string literal.
+    if expression.matches('\'').count() % 2 == 1 {
+        return None;
+    }
+    Some(keyword_fragment(expression))
+}
+
+/// The trailing run of keyword characters in `expression`.
+///
+/// A keyword is a name (`used_pct`) or a function the registry marks with `()`
+/// (`convert_bytes()`), so a run of letters, digits and underscores is as much
+/// of one as can already have been typed; anything else -- an operator, a space,
+/// the `(` of a function -- ends the expression on a point where a keyword
+/// begins, and the fragment is empty.
+fn keyword_fragment(expression: &str) -> &str {
+    let start = expression
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .last()
+        .map_or(expression.len(), |(at, _)| at);
+    &expression[start..]
+}
+
+/// The one line to show beside a suggestion.
+///
+/// The summary line when the agent sent one, and the first line of the long
+/// description otherwise -- which is where a filter keyword's text tends to be,
+/// the agent leaving its summary empty for those.
+fn summary(short: &str, long: &str) -> String {
+    if !short.is_empty() {
+        return short.to_owned();
+    }
+    long.lines().next().unwrap_or_default().to_owned()
+}
+
+/// The choice to show when Tab cannot narrow it down any further.
+///
+/// Names on one line while there is nothing to say about any of them -- which is
+/// what an agent that sends no descriptions leaves, and what this always did --
+/// and a line each, name beside summary, as soon as there is.
+pub fn candidate_lines(candidates: &[Suggestion]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    if candidates.iter().all(|c| c.description.is_empty()) {
+        return vec![
+            candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join("  "),
+        ];
+    }
+    let width = candidates
+        .iter()
+        .map(|c| c.text.chars().count())
+        .max()
+        .unwrap_or(0);
+    candidates
+        .iter()
+        .map(|c| {
+            format!("  {:width$}  {}", c.text, c.description)
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
 /// How an option should be offered.
 ///
 /// Checks declare their flags so that REST can pass `show-all=true`, and a bare
@@ -525,14 +701,14 @@ fn suggest_argument(parameter: &crate::nsclient::messages::QueryParameter) -> St
 }
 
 /// The longest prefix every candidate shares, or `None` if there are none.
-fn shared_prefix(candidates: &[String]) -> Option<String> {
-    let first = candidates.first()?;
+fn shared_prefix(candidates: &[Suggestion]) -> Option<String> {
+    let first = &candidates.first()?.text;
     let mut length = first.len();
     for other in &candidates[1..] {
         length = length.min(
             first
                 .char_indices()
-                .zip(other.char_indices())
+                .zip(other.text.char_indices())
                 .take_while(|((_, a), (_, b))| a == b)
                 .last()
                 .map_or(0, |((i, c), _)| i + c.len_utf8()),
@@ -680,7 +856,7 @@ fn tokenize_command(input: &str) -> anyhow::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nsclient::messages::QueryParameter;
+    use crate::nsclient::messages::{QueryField, QueryParameter};
 
     #[test]
     fn command_input_tokenizer_handles_quotes() {
@@ -880,8 +1056,28 @@ mod tests {
                 parameter("show-all", "bool", ""),
                 parameter("critical", "string", "none"),
             ],
-            fields: vec![],
+            fields: vec![
+                // The agent leaves a keyword's summary empty and puts the text
+                // in the long description, which is what `summary` reaches for.
+                field("free", "", "Free disk space"),
+                field("used", "Used space", "Used disk space on the drive"),
+                field("convert_bytes()", "", "Convert a byte value."),
+            ],
         }
+    }
+
+    fn field(name: &str, short: &str, long: &str) -> QueryField {
+        QueryField {
+            name: name.into(),
+            short_description: short.into(),
+            long_description: long.into(),
+        }
+    }
+
+    /// Suggestions with nothing to say about them, as an agent that describes
+    /// nothing leaves them.
+    fn suggestions(texts: &[&str]) -> Vec<Suggestion> {
+        texts.iter().copied().map(Suggestion::bare).collect()
     }
 
     /// An input that already knows `check_cpu` and what it accepts.
@@ -1009,13 +1205,13 @@ mod tests {
     #[test]
     fn shared_prefix_is_as_far_as_every_candidate_agrees() {
         assert_eq!(shared_prefix(&[]), None);
-        assert_eq!(shared_prefix(&["only".into()]), Some("only".into()));
+        assert_eq!(shared_prefix(&suggestions(&["only"])), Some("only".into()));
         assert_eq!(
-            shared_prefix(&["warning".into(), "warn-on-error".into()]),
+            shared_prefix(&suggestions(&["warning", "warn-on-error"])),
             Some("warn".into())
         );
         assert_eq!(
-            shared_prefix(&["alpha".into(), "beta".into()]),
+            shared_prefix(&suggestions(&["alpha", "beta"])),
             Some(String::new())
         );
     }
@@ -1056,9 +1252,206 @@ mod tests {
         // Pressing again has nothing left to add, so it shows the choice.
         assert_eq!(
             input.complete(),
-            Completion::Candidates(vec!["warning=".into(), "warn-on-error=".into()])
+            Completion::Candidates(suggestions(&["warning=", "warn-on-error="]))
         );
         assert_eq!(input.get_state().value(), "check_cpu warn");
+    }
+
+    #[test]
+    fn filter_keyword_being_typed_finds_the_expression_the_line_ends_in() {
+        // Not in one at all: the command name, and an option being named.
+        assert_eq!(filter_keyword_being_typed("check_cpu"), None);
+        assert_eq!(filter_keyword_being_typed("check_cpu "), None);
+        assert_eq!(filter_keyword_being_typed("check_cpu warn"), None);
+        // In one, from the `=` onwards.
+        assert_eq!(filter_keyword_being_typed("check_cpu filter="), Some(""));
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=fr"),
+            Some("fr")
+        );
+        // Every option that takes an expression, abbreviations included.
+        for option in ["warning", "warn", "critical", "crit", "ok"] {
+            assert_eq!(
+                filter_keyword_being_typed(&format!("check_cpu {option}=us")),
+                Some("us"),
+                "{option}"
+            );
+        }
+        // `empty-state` takes a state, not an expression.
+        assert_eq!(filter_keyword_being_typed("check_cpu empty-state=cr"), None);
+        // An expression holds spaces, so it is quoted -- and until the quote is
+        // closed the line is still inside the value.
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=\"free > 10 and us"),
+            Some("us")
+        );
+        // The operator itself is not a keyword, and every keyword may follow it.
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=\"free > "),
+            Some("")
+        );
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=\"convert_bytes("),
+            Some("")
+        );
+        // Inside a string literal what comes next is the rest of the literal.
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=\"state = 'run"),
+            None
+        );
+        // Closed again, and a keyword can follow.
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=\"state = 'running' and fr"),
+            Some("fr")
+        );
+        // Past the closing quote the word has ended: the next one is an option.
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=\"free > 10\" sho"),
+            None
+        );
+        // Only the first `=` of the word divides it; the rest is expression.
+        assert_eq!(
+            filter_keyword_being_typed("check_cpu filter=state=='x'"),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn tab_completes_a_filter_keyword_inside_a_filter_expression() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu filter=fr");
+        assert_eq!(input.complete(), Completion::Extended);
+        // The keyword goes in bare: what follows it is an operator, not a value.
+        assert_eq!(input.get_state().value(), "check_cpu filter=free");
+    }
+
+    #[test]
+    fn tab_keeps_a_filter_functions_parentheses() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu warning=conv");
+        assert_eq!(input.complete(), Completion::Extended);
+        // The `()` is what tells a function from a variable, so it is part of
+        // the name the registry gave.
+        assert_eq!(
+            input.get_state().value(),
+            "check_cpu warning=convert_bytes()"
+        );
+    }
+
+    #[test]
+    fn tab_right_after_the_equals_offers_every_keyword_with_what_it_means() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu filter=");
+        assert_eq!(
+            input.complete(),
+            Completion::Candidates(vec![
+                // The agent left the summary empty for these two, so the first
+                // line of the long description stands in.
+                Suggestion::described("free", "Free disk space".into()),
+                Suggestion::described("used", "Used space".into()),
+                Suggestion::described("convert_bytes()", "Convert a byte value.".into()),
+            ])
+        );
+        // Showing the choice does not change the line.
+        assert_eq!(input.get_state().value(), "check_cpu filter=");
+    }
+
+    #[test]
+    fn tab_completes_a_keyword_after_an_operator_in_a_quoted_expression() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu filter=\"free > 10 and us");
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(
+            input.get_state().value(),
+            "check_cpu filter=\"free > 10 and used"
+        );
+    }
+
+    #[test]
+    fn tab_offers_nothing_inside_a_string_literal() {
+        let mut input = input_with_help();
+        // `us` here is the start of a value the check compares against, and the
+        // keywords are not candidates for it.
+        type_text(&mut input, "check_cpu filter=\"state = 'us");
+        assert_eq!(input.complete(), Completion::Nothing);
+        assert_eq!(input.get_state().value(), "check_cpu filter=\"state = 'us");
+    }
+
+    #[test]
+    fn tab_is_back_to_options_once_the_filter_value_is_over() {
+        let mut input = input_with_help();
+        type_text(&mut input, "check_cpu filter=\"free > 10\" show");
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(
+            input.get_state().value(),
+            "check_cpu filter=\"free > 10\" show-all "
+        );
+    }
+
+    #[test]
+    fn a_keyword_is_offered_again_although_it_is_already_in_the_expression() {
+        let mut input = input_with_help();
+        // Unlike an option, a keyword may be named twice in one expression.
+        type_text(&mut input, "check_cpu filter=\"free > 10 and fr");
+        assert_eq!(input.complete(), Completion::Extended);
+        assert_eq!(
+            input.get_state().value(),
+            "check_cpu filter=\"free > 10 and free"
+        );
+    }
+
+    #[test]
+    fn a_check_that_is_not_filter_based_offers_no_keywords() {
+        let mut input = CommandInput::new(vec![]);
+        input.update_commands(vec!["check_ok".into()]);
+        // An empty `fields` list is how the agent says the check is not filter
+        // based, and there is then nothing to offer inside `filter=`.
+        input.on_query_help(
+            "check_ok",
+            Some(QueryHelp {
+                name: "check_ok".into(),
+                keyword_source: "check_ok".into(),
+                parameters: vec![parameter("filter", "string", "none")],
+                fields: vec![],
+            }),
+        );
+        type_text(&mut input, "check_ok filter=fr");
+        assert_eq!(input.complete(), Completion::Nothing);
+        assert_eq!(input.get_state().value(), "check_ok filter=fr");
+    }
+
+    #[test]
+    fn summary_falls_back_to_the_first_line_of_the_long_description() {
+        assert_eq!(
+            summary("Used space", "Used disk space\nand more"),
+            "Used space"
+        );
+        assert_eq!(
+            summary("", "Free disk space\nsecond line"),
+            "Free disk space"
+        );
+        assert_eq!(summary("", ""), "");
+    }
+
+    #[test]
+    fn candidate_lines_show_names_alone_until_there_is_something_to_say() {
+        assert!(candidate_lines(&[]).is_empty());
+        // Nothing described: one line, as this always did.
+        assert_eq!(
+            candidate_lines(&suggestions(&["warning=", "warn-on-error="])),
+            vec!["warning=  warn-on-error=".to_string()]
+        );
+        // Described: a line each, names aligned so the summaries line up.
+        assert_eq!(
+            candidate_lines(&[
+                Suggestion::described("free", "Free disk space".into()),
+                Suggestion::described("convert_bytes()", String::new()),
+            ]),
+            vec![
+                "  free             Free disk space".to_string(),
+                "  convert_bytes()".to_string(),
+            ]
+        );
     }
 
     #[test]
