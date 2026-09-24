@@ -26,7 +26,7 @@ jobs:
     name: Format & lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install system dependencies
         run: |
@@ -34,12 +34,12 @@ jobs:
           sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -51,7 +51,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   build:
     name: Build ${{ matrix.os }} ${{ matrix.arch }}
@@ -74,7 +74,7 @@ jobs:
             arch: arm64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Calculate Target
         id: target
@@ -120,12 +120,12 @@ jobs:
           esac
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ steps.target.outputs.triple }}
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/bin
@@ -136,21 +136,40 @@ jobs:
 
       - name: Set Version
         shell: bash
-        run: sed -i 's/^version = ".*"/version = "${{ inputs.version }}"/' Cargo.toml
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          # Update only this package so locked builds retain all dependency versions.
+          sed -i "/^name = \"check_nsclient\"$/,/^$/s/^version = \".*\"/version = \"$VERSION\"/" Cargo.lock
 
       - name: Build
-        run: cargo build --release --target ${{ steps.target.outputs.triple }}
+        run: cargo build --locked --release --target ${{ steps.target.outputs.triple }}
 
       - name: Test
         # Skip running tests when cross-compiling to a target that cannot run on the host
         # (e.g. building aarch64-pc-windows-msvc on an x64 Windows runner produces binaries
         # that fail with "os error 216" when executed).
         if: ${{ !(startsWith(matrix.os, 'windows-') && matrix.arch == 'arm64') && !(startsWith(matrix.os, 'ubuntu-') && matrix.arch == 'arm64') }}
-        run: cargo test --release --target ${{ steps.target.outputs.triple }}
+        run: cargo test --locked --release --target ${{ steps.target.outputs.triple }}
+
+      - name: Install SBOM generator
+        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+
+      - name: Generate target SBOM
+        shell: bash
+        run: |
+          # cargo-cyclonedx uses Cargo metadata with the same target and default
+          # features as the build. Fail if metadata resolution changes the lockfile.
+          cp Cargo.lock target/sbom-Cargo.lock
+          cargo cyclonedx --format json --spec-version 1.5 \
+            --target "${{ steps.target.outputs.triple }}" --override-filename check_nsclient.cdx
+          cmp Cargo.lock target/sbom-Cargo.lock
+          mv check_nsclient.cdx.json "target/${{ steps.target.outputs.triple }}/release/check_nsclient.cdx.json"
 
       - name: Sign Windows Binary
         if: startsWith(matrix.os, 'windows-')
-        uses: azure/trusted-signing-action@v1.0.0
+        uses: azure/trusted-signing-action@db7a3a6bd3912025c705162fb7475389f5b69ec6 # v1.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -163,8 +182,10 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: check_nsclient-${{ steps.target.outputs.os_name }}-${{ matrix.arch }}
-          path: target/${{ steps.target.outputs.triple }}/release/check_nsclient${{ startsWith(matrix.os, 'windows-') && '.exe' || '' }}
+          path: |
+            target/${{ steps.target.outputs.triple }}/release/check_nsclient${{ steps.target.outputs.file_ext }}
+            target/${{ steps.target.outputs.triple }}/release/check_nsclient.cdx.json
           if-no-files-found: error

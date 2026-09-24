@@ -51,7 +51,7 @@ try {
     $env:CHECK_NSCLIENT_IT_USERNAME = if ($env:NSCP_USERNAME) { $env:NSCP_USERNAME } else { "admin" }
     Push-Location $root
     try {
-        cargo test --test integration -- @CargoArgs
+        cargo test --locked --test integration -- @CargoArgs
         if ($LASTEXITCODE -ne 0) { throw "integration tests failed" }
     } finally {
         Pop-Location

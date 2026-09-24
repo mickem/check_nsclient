@@ -24,12 +24,14 @@ jobs:
     name: Linux (Docker, .deb) vs NSClient++ ${{ inputs.nscp-version || '(pinned)' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Resolve NSClient++ version
         id: nscp
+        env:
+          NSCP_VERSION: ${{ inputs.nscp-version }}
         run: |
-          version="${{ inputs.nscp-version }}"
+          version="$NSCP_VERSION"
           if [ -z "$version" ]; then version="$(tr -d '[:space:]' < .nscp_version)"; fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Testing against NSClient++ $version"
@@ -51,10 +53,10 @@ jobs:
           retry sudo apt-get install -y libdbus-1-dev pkg-config gnome-keyring dbus dbus-x11 curl
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -63,12 +65,14 @@ jobs:
           key: ${{ runner.os }}-integration-cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Build check_nsclient and the test binary
-        run: cargo test --test integration --no-run
+        run: cargo test --locked --test integration --no-run
 
       - name: Build NSClient++ image
+        env:
+          NSCP_VERSION: ${{ steps.nscp.outputs.version }}
         run: |
           docker build \
-            --build-arg "NSCP_VERSION=${{ steps.nscp.outputs.version }}" \
+            --build-arg "NSCP_VERSION=$NSCP_VERSION" \
             --build-arg NSCP_ARCH=amd64 \
             --build-arg NSCP_PASSWORD=it-password \
             -t check_nsclient-it tests/integration
@@ -94,7 +98,7 @@ jobs:
           dbus-run-session -- bash -c '
             set -e
             echo -n "ci" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
-            cargo test --test integration
+            cargo test --locked --test integration
           '
 
       - name: NSClient++ logs
@@ -109,13 +113,13 @@ jobs:
     name: Windows (native, .zip) vs NSClient++ ${{ inputs.nscp-version || '(pinned)' }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache dependencies
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.cargo/registry
@@ -124,7 +128,7 @@ jobs:
           key: ${{ runner.os }}-integration-cargo-${{ hashFiles('Cargo.lock') }}
 
       - name: Build check_nsclient and the test binary
-        run: cargo test --test integration --no-run
+        run: cargo test --locked --test integration --no-run
 
       # Downloads the release zip, enables the REST API, runs `nscp test` in the
       # background and executes the suite against it (see the script header).

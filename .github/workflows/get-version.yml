@@ -17,18 +17,26 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       with:
         fetch-depth: 0
 
     - name: Fetch version from git tags
       id: version
-      uses: codacy/git-version@2.8.7
-      with:
-        release-branch: main
-        # Pin the downloaded git-version binary instead of resolving
-        # 'latest' via api.github.com — anonymous Actions runners share a
-        # 60 req/hour IP quota and the bootstrap fails with curl exit 6
-        # when rate-limited.
-        tool-version: 2.8.7
+      env:
+        # The upstream action downloads this binary without checking its hash.
+        # Review the version and checksum together when updating the tool.
+        TOOL_VERSION: 2.8.7
+        TOOL_SHA256: b79d77436644a9fd4c2784feea62bd893895e5469d148eb8d02b267bd340c94d
+      run: |
+        curl --fail --location --silent --show-error --retry 3 \
+          "https://github.com/codacy/git-version/releases/download/$TOOL_VERSION/git-version" \
+          --output "$RUNNER_TEMP/git-version"
+        printf '%s  %s\n' "$TOOL_SHA256" "$RUNNER_TEMP/git-version" | sha256sum --check --strict -
+        chmod +x "$RUNNER_TEMP/git-version"
+        version="$("$RUNNER_TEMP/git-version" --release-branch main --dev-branch dev \
+          --minor-identifier 'feature:' --major-identifier 'breaking:' \
+          --log-paths ./ --version-prefix '')"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "New Version: $version"
 

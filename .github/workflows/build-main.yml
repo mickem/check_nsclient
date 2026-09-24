@@ -24,6 +24,11 @@ jobs:
     uses: ./.github/workflows/integration-tests.yml
   release:
     needs: [get-version, build]
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/release.yml
     with:
       version: ${{ needs.get-version.outputs.version }}

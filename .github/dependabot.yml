@@ -10,7 +10,7 @@ updates:
         patterns:
           - "*"
   - package-ecosystem: cargo
-    directory: "/rust/nscp_client"
+    directory: "/"
     schedule:
       interval: "weekly"
     groups:

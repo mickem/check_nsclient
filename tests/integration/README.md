@@ -19,6 +19,16 @@ Two ways to provide the server, both driven by the version in `.nscp_version`
 | `run.sh` / `run.ps1`         | Ubuntu 24.04 container + official `.deb`            | Docker  |
 | `run-windows.ps1`            | Native Windows `nscp.exe` from the official `.zip`  | Windows |
 
+The packages must have a SHA-256 entry in [`downloads.sha256`](downloads.sha256).
+Both runners verify the package before installation or extraction; Windows also
+checks previously cached ZIPs. Unknown versions, missing or duplicate checksum
+entries, and mismatched files fail the run. Before using a different
+`NSCP_VERSION` (including the examples below), review its upstream release and
+record the hashes for the platforms you will test. Update `.nscp_version` and
+the checksum file together when changing the default release.
+
+Builds and tests use the committed `Cargo.lock` with `--locked`.
+
 ## Docker (Linux package)
 
 ```sh
@@ -33,7 +43,7 @@ tests\integration\run.ps1                      # Docker Desktop, Linux container
 
 The script builds `tests/integration/Dockerfile` (Ubuntu 24.04 + the official
 `.deb` from the nscp GitHub release), starts it on port 8443, runs
-`cargo test --test integration` and removes the container again.
+`cargo test --locked --test integration` and removes the container again.
 
 | Variable        | Default              | Purpose                                 |
 | --------------- | -------------------- | --------------------------------------- |
@@ -70,7 +80,7 @@ Set the target directly and run the test binary; nothing is built or started:
 CHECK_NSCLIENT_IT_URL=https://127.0.0.1:8443 \
 CHECK_NSCLIENT_IT_USERNAME=admin \
 CHECK_NSCLIENT_IT_PASSWORD=secret \
-  cargo test --test integration
+  cargo test --locked --test integration
 ```
 
 The server needs the REST API (WEBServer) enabled with the `CheckHelpers`,

@@ -3,6 +3,8 @@ name: Create release
 permissions:
   contents: write
   actions: read
+  id-token: write
+  attestations: write
 
 on:
   workflow_call:
@@ -17,56 +19,122 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Download windows x64
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: check_nsclient-windows-x64
           path: artifacts/windows-x64
       - name: Download windows x86
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: check_nsclient-windows-x86
           path: artifacts/windows-x86
       - name: Download windows arm64
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: check_nsclient-windows-arm64
           path: artifacts/windows-arm64
       - name: Download linux x64
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: check_nsclient-linux-x64
           path: artifacts/linux-x64
       - name: Download linux arm64
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: check_nsclient-linux-arm64
           path: artifacts/linux-arm64
 
       - name: Rename release assets
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           mkdir -p release
-          cp artifacts/windows-x64/check_nsclient.exe   release/check_nsclient-${{ inputs.version }}-windows-x64.exe
-          cp artifacts/windows-x86/check_nsclient.exe   release/check_nsclient-${{ inputs.version }}-windows-x86.exe
-          cp artifacts/windows-arm64/check_nsclient.exe release/check_nsclient-${{ inputs.version }}-windows-arm64.exe
-          cp artifacts/linux-x64/check_nsclient         release/check_nsclient-${{ inputs.version }}-linux-x64
-          cp artifacts/linux-arm64/check_nsclient       release/check_nsclient-${{ inputs.version }}-linux-arm64
-          chmod +x release/check_nsclient-${{ inputs.version }}-linux-x64 release/check_nsclient-${{ inputs.version }}-linux-arm64
+          for platform in windows-x64 windows-x86 windows-arm64 linux-x64 linux-arm64; do
+            extension=""
+            if [[ "$platform" == windows-* ]]; then extension=".exe"; fi
+            cp "artifacts/$platform/check_nsclient$extension" "release/check_nsclient-$VERSION-$platform$extension"
+            cp "artifacts/$platform/check_nsclient.cdx.json" "release/check_nsclient-$VERSION-$platform.cdx.json"
+          done
+          chmod +x "release/check_nsclient-$VERSION-linux-x64" "release/check_nsclient-$VERSION-linux-arm64"
+
+      - name: Create SHA-256 checksums
+        working-directory: release
+        run: |
+          # Hash the final, signed binaries and their SBOMs using release basenames.
+          LC_ALL=C sha256sum --binary check_nsclient-* > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+
+      - name: Attest release provenance
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            release/check_nsclient-*
+            release/SHA256SUMS
+
+      - name: Attest Windows x64 SBOM
+        id: sbom_windows_x64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/check_nsclient-${{ inputs.version }}-windows-x64.exe
+          sbom-path: release/check_nsclient-${{ inputs.version }}-windows-x64.cdx.json
+
+      - name: Attest Windows x86 SBOM
+        id: sbom_windows_x86
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/check_nsclient-${{ inputs.version }}-windows-x86.exe
+          sbom-path: release/check_nsclient-${{ inputs.version }}-windows-x86.cdx.json
+
+      - name: Attest Windows arm64 SBOM
+        id: sbom_windows_arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/check_nsclient-${{ inputs.version }}-windows-arm64.exe
+          sbom-path: release/check_nsclient-${{ inputs.version }}-windows-arm64.cdx.json
+
+      - name: Attest Linux x64 SBOM
+        id: sbom_linux_x64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/check_nsclient-${{ inputs.version }}-linux-x64
+          sbom-path: release/check_nsclient-${{ inputs.version }}-linux-x64.cdx.json
+
+      - name: Attest Linux arm64 SBOM
+        id: sbom_linux_arm64
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release/check_nsclient-${{ inputs.version }}-linux-arm64
+          sbom-path: release/check_nsclient-${{ inputs.version }}-linux-arm64.cdx.json
+
+      - name: Collect attestation bundles
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          SBOM_WINDOWS_X64_BUNDLE: ${{ steps.sbom_windows_x64.outputs.bundle-path }}
+          SBOM_WINDOWS_X86_BUNDLE: ${{ steps.sbom_windows_x86.outputs.bundle-path }}
+          SBOM_WINDOWS_ARM64_BUNDLE: ${{ steps.sbom_windows_arm64.outputs.bundle-path }}
+          SBOM_LINUX_X64_BUNDLE: ${{ steps.sbom_linux_x64.outputs.bundle-path }}
+          SBOM_LINUX_ARM64_BUNDLE: ${{ steps.sbom_linux_arm64.outputs.bundle-path }}
+        run: |
+          # JSONL is accepted by `gh attestation verify --bundle`.
+          jq -c . "$PROVENANCE_BUNDLE" \
+            "$SBOM_WINDOWS_X64_BUNDLE" "$SBOM_WINDOWS_X86_BUNDLE" "$SBOM_WINDOWS_ARM64_BUNDLE" \
+            "$SBOM_LINUX_X64_BUNDLE" "$SBOM_LINUX_ARM64_BUNDLE" > release/attestations.jsonl
 
       - name: Create Release
         id: create_release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
         with:
           tag: ${{ inputs.version }}
+          commit: ${{ github.sha }}
           name: ${{ inputs.version }}
           draft: true
           prerelease: false
           generateReleaseNotes: true
-          artifacts: |
-            release/check_nsclient-${{ inputs.version }}-windows-x64.exe
-            release/check_nsclient-${{ inputs.version }}-windows-x86.exe
-            release/check_nsclient-${{ inputs.version }}-windows-arm64.exe
-            release/check_nsclient-${{ inputs.version }}-linux-x64
-            release/check_nsclient-${{ inputs.version }}-linux-arm64
+          body: |
+            Verify the binaries, SBOMs, and checksums using the [release verification guide](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/docs/release-verification.md).
+          artifacts: release/*
+          artifactErrorsFailBuild: true
