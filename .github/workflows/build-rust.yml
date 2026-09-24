@@ -26,7 +26,7 @@ jobs:
     name: Format & lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install system dependencies
         run: |
@@ -39,7 +39,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache dependencies
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -74,7 +74,7 @@ jobs:
             arch: arm64
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Calculate Target
         id: target
@@ -125,7 +125,7 @@ jobs:
           targets: ${{ steps.target.outputs.triple }}
 
       - name: Cache dependencies
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/bin
@@ -169,7 +169,7 @@ jobs:
 
       - name: Sign Windows Binary
         if: startsWith(matrix.os, 'windows-')
-        uses: azure/trusted-signing-action@db7a3a6bd3912025c705162fb7475389f5b69ec6 # v1.0.0
+        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -182,7 +182,7 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: check_nsclient-${{ steps.target.outputs.os_name }}-${{ matrix.arch }}
           path: |
