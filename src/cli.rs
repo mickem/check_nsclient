@@ -96,6 +96,11 @@ pub enum NSClientCommands {
         #[command(subcommand)]
         command: TagsCommand,
     },
+    /// Inspect and refresh the host inventory
+    Facts {
+        #[command(subcommand)]
+        command: FactsCommand,
+    },
     /// Discover what this agent can check and submit to
     Metadata {
         #[command(subcommand)]
@@ -279,6 +284,17 @@ pub enum MetadataCommand {
 pub enum TagsCommand {
     /// Show all tags set on this agent
     Show {},
+}
+
+#[derive(Subcommand)]
+pub enum FactsCommand {
+    /// Show the collected inventory, or a subtree (does not trigger collection)
+    Show {
+        /// Dotted fact path, for example os, os.family or storage.volumes
+        path: Option<String>,
+    },
+    /// Ask all enabled producers to collect now and show the resulting inventory
+    Refresh {},
 }
 
 #[derive(Subcommand)]
@@ -779,6 +795,39 @@ mod tests {
             } if id == "prod"
         ));
         assert!(Cli::try_parse_from(["check_nsclient", "profile", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn facts_commands_parse_with_profile_and_output_options() {
+        for path in [None, Some("os.family")] {
+            let mut args = vec![
+                "--output", "json", "nsclient", "-p", "prod", "facts", "show",
+            ];
+            args.extend(path);
+            let cli = parse(&args);
+            assert!(matches!(cli.output, OutputFormat::Json));
+            let Commands::NSClient(options) = cli.command else {
+                panic!("not an nsclient command");
+            };
+            assert_eq!(options.profile.as_deref(), Some("prod"));
+            assert!(matches!(options.command,
+                NSClientCommands::Facts { command: FactsCommand::Show { path: parsed } }
+                    if parsed.as_deref() == path));
+        }
+        let cli = parse(&["nsclient", "facts", "refresh"]);
+        assert!(matches!(
+            cli.command,
+            Commands::NSClient(NSClientCommandOptions {
+                command: NSClientCommands::Facts {
+                    command: FactsCommand::Refresh {}
+                },
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["check_nsclient", "nsclient", "facts"]).is_err());
+        assert!(
+            Cli::try_parse_from(["check_nsclient", "nsclient", "facts", "refresh", "os"]).is_err()
+        );
     }
 
     #[test]

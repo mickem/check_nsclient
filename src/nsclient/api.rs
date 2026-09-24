@@ -4,11 +4,11 @@ use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
     AliasResult, CachedResult, DescribedMetrics, EventRecord, ExecuteNagiosResult, ExecuteResult,
-    ListModulesResult, ListQueriesResult, LogClearResult, LogRecord, LogStatus, LoginResponse,
-    MetadataChannel, MetadataResource, Metrics, ModulesResult, NewLogRecord, PaginatedResponse,
-    PingResult, QueryHelp, QueryResult, ResultFilter, ResultsRemoved, ScriptRuntimes,
-    SettingsCommandAction, SettingsCommandRequest, SettingsDeleteResult, SettingsDescription,
-    SettingsDiff, SettingsEntry, SettingsStatus, Tags,
+    FactsResponse, ListModulesResult, ListQueriesResult, LogClearResult, LogRecord, LogStatus,
+    LoginResponse, MetadataChannel, MetadataResource, Metrics, ModulesResult, NewLogRecord,
+    PaginatedResponse, PingResult, QueryHelp, QueryResult, ResultFilter, ResultsRemoved,
+    ScriptRuntimes, SettingsCommandAction, SettingsCommandRequest, SettingsDeleteResult,
+    SettingsDescription, SettingsDiff, SettingsEntry, SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -400,6 +400,9 @@ pub trait ApiClientApi: Send + Sync {
     async fn get_metadata_counters(&self) -> anyhow::Result<Vec<serde_json::Value>>;
     async fn get_metadata_channels(&self) -> anyhow::Result<Vec<MetadataChannel>>;
     async fn get_tags(&self) -> anyhow::Result<Tags>;
+    /// Read the full inventory when `path` is empty, otherwise a dotted subtree.
+    async fn get_facts(&self, path: &str) -> anyhow::Result<FactsResponse>;
+    async fn refresh_facts(&self) -> anyhow::Result<FactsResponse>;
     async fn get_metrics(&self) -> anyhow::Result<Metrics>;
     /// The same readings as [`ApiClientApi::get_metrics`] plus what each one
     /// means, taken from a single snapshot (`?meta=1`).
@@ -654,6 +657,20 @@ impl ApiClientApi for ApiClient {
         self.get_json("api/v2/tags").await
     }
 
+    async fn get_facts(&self, path: &str) -> anyhow::Result<FactsResponse> {
+        if path.is_empty() {
+            return self.get_json("api/v2/facts").await;
+        }
+        let params = [("path".to_string(), path.to_string())];
+        self.get_with_query("api/v2/facts", &params).await
+    }
+
+    async fn refresh_facts(&self) -> anyhow::Result<FactsResponse> {
+        let path = "api/v2/facts/commands/refresh";
+        let response = self.send(Method::POST, path, |b| b).await?;
+        Self::parse_json(response, path).await
+    }
+
     async fn get_metrics(&self) -> anyhow::Result<Metrics> {
         self.get_json("api/v2/metrics").await
     }
@@ -758,6 +775,8 @@ pub mod mocks {
             async fn get_metadata_counters(&self) -> anyhow::Result<Vec<serde_json::Value>>;
             async fn get_metadata_channels(&self) -> anyhow::Result<Vec<MetadataChannel>>;
             async fn get_tags(&self) -> anyhow::Result<Tags>;
+            async fn get_facts(&self, path: &str) -> anyhow::Result<FactsResponse>;
+            async fn refresh_facts(&self) -> anyhow::Result<FactsResponse>;
             async fn get_metrics(&self) -> anyhow::Result<Metrics>;
             async fn get_metrics_described(&self) -> anyhow::Result<DescribedMetrics>;
             async fn get_openmetrics(&self) -> anyhow::Result<String>;
@@ -1518,6 +1537,140 @@ mod tests {
 
         let api = token_client(&server.uri(), "secret", None);
         assert_eq!(api.get_tags().await.unwrap()["env"], "prod");
+    }
+
+    fn facts_envelope(
+        selected_path: &str,
+        found: bool,
+        facts: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "revision": 7, "collected": "2026-09-23T10:00:00Z",
+            "path": selected_path, "found": found, "enabled": ["os", "hardware"],
+            "errors": {"hardware": "WMI query timed out"},
+            "gathered": {"os": "2026-09-23T06:12:41Z"}, "facts": facts
+        })
+    }
+
+    #[tokio::test]
+    async fn facts_get_and_refresh_use_authenticated_endpoints_and_keep_the_envelope() {
+        let server = MockServer::start().await;
+        let body = facts_envelope(
+            "",
+            true,
+            serde_json::json!({
+                "os": {"family": "windows"}, "hardware": {"cpu_cores": 20, "memory_gb": 32.5}
+            }),
+        );
+        for (verb, endpoint) in [
+            ("GET", "/api/v2/facts"),
+            ("POST", "/api/v2/facts/commands/refresh"),
+        ] {
+            Mock::given(method(verb))
+                .and(path(endpoint))
+                .and(header("authorization", "Bearer secret"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let api = token_client(&server.uri(), "secret", None);
+        assert_eq!(
+            serde_json::to_value(api.get_facts("").await.unwrap()).unwrap(),
+            body
+        );
+        assert_eq!(
+            serde_json::to_value(api.refresh_facts().await.unwrap()).unwrap(),
+            body
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests[0].url.query().unwrap_or_default().is_empty());
+        assert!(requests[1].body.is_empty(), "refresh takes no payload");
+    }
+
+    #[tokio::test]
+    async fn facts_paths_are_query_encoded_and_can_select_any_json_node() {
+        let server = MockServer::start().await;
+        let api = token_client(&server.uri(), "secret", None);
+        for (selected_path, found, value) in [
+            ("os", true, serde_json::json!({"family": "linux"})),
+            ("os.family", true, serde_json::json!("linux")),
+            ("hardware.cpu_cores", true, serde_json::json!(20)),
+            (
+                "storage.volumes",
+                true,
+                serde_json::json!([{"id": "/", "size": 42}]),
+            ),
+            ("os.features", true, serde_json::json!(["a", "b"])),
+            ("os.secure_boot", true, serde_json::json!(false)),
+            ("missing &path=os#?", false, serde_json::json!({})),
+        ] {
+            let body = facts_envelope(selected_path, found, value);
+            Mock::given(method("GET"))
+                .and(path("/api/v2/facts"))
+                .and(query_param("path", selected_path))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let response = api.get_facts(selected_path).await.unwrap();
+            assert_eq!(serde_json::to_value(response).unwrap(), body);
+        }
+        for request in server.received_requests().await.unwrap() {
+            assert_eq!(request.url.query_pairs().count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn facts_empty_fallback_without_path_is_supported() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/facts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "revision": 0, "collected": "", "enabled": [], "errors": {},
+                "gathered": {}, "found": false, "facts": {}
+            })))
+            .mount(&server)
+            .await;
+        let api = token_client(&server.uri(), "secret", None);
+        let response = api.get_facts("").await.unwrap();
+        assert_eq!(response.path, "");
+        assert_eq!(response.revision, 0);
+        assert!(!response.found);
+    }
+
+    #[tokio::test]
+    async fn facts_http_and_decoding_failures_are_not_empty_inventories() {
+        for (status, body) in [
+            (403, "Forbidden"),
+            (404, "Document not found"),
+            (500, "Failed to refresh facts"),
+            (200, "not json"),
+            (200, "{}"),
+            (200, ""),
+        ] {
+            let server = MockServer::start().await;
+            for (verb, endpoint) in [
+                ("GET", "/api/v2/facts"),
+                ("POST", "/api/v2/facts/commands/refresh"),
+            ] {
+                Mock::given(method(verb))
+                    .and(path(endpoint))
+                    .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let api = token_client(&server.uri(), "secret", None);
+            let read_error = api.get_facts("").await.unwrap_err().to_string();
+            let refresh_error = api.refresh_facts().await.unwrap_err().to_string();
+            for error in [read_error, refresh_error] {
+                assert!(error.contains("api/v2/facts"), "{error}");
+                if status != 200 {
+                    assert!(error.contains(&status.to_string()), "{error}");
+                }
+            }
+        }
     }
 
     #[tokio::test]
