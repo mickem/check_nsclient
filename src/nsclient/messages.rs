@@ -180,6 +180,25 @@ fn render_labels(labels: &HashMap<String, String>) -> String {
 /// Agent tags: free-form `name -> value` labels attached to this host.
 pub type Tags = HashMap<String, String>;
 
+/// The facts response envelope. A path can select an object, list or scalar,
+/// so the inventory remains JSON instead of assuming particular producers.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FactsResponse {
+    pub revision: u64,
+    pub collected: String,
+    // The server's empty fallback response omits the path.
+    #[serde(default)]
+    pub path: String,
+    pub found: bool,
+    pub enabled: Vec<String>,
+    pub errors: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub gathered: std::collections::BTreeMap<String, String>,
+    pub facts: Value,
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PaginatedResponse<T> {
     pub content: T,
