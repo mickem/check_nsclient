@@ -26,11 +26,18 @@ RUN apt-get update \
         || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends liblua5.4-0) \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL -o /tmp/nscp.deb \
-        "https://github.com/mickem/nscp/releases/download/${NSCP_VERSION}/NSCP-${NSCP_VERSION}-ubuntu-24.04-${NSCP_ARCH}.deb" \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/nscp.deb \
-    && rm -rf /var/lib/apt/lists/* /tmp/nscp.deb
+COPY downloads.sha256 /tmp/nscp-downloads.sha256
+RUN set -eu; \
+    package="NSCP-${NSCP_VERSION}-ubuntu-24.04-${NSCP_ARCH}.deb"; \
+    awk -v name="$package" '{ sub(/\r$/, "") } $2 == name { print; found++ } END { if (found != 1) exit 1 }' \
+        /tmp/nscp-downloads.sha256 > /tmp/nscp.sha256; \
+    cd /tmp; \
+    curl --fail --location --silent --show-error --retry 3 -o "$package" \
+        "https://github.com/mickem/nscp/releases/download/${NSCP_VERSION}/$package"; \
+    sha256sum --check --strict nscp.sha256; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "/tmp/$package"; \
+    rm -rf /var/lib/apt/lists/* "/tmp/$package" /tmp/nscp.sha256 /tmp/nscp-downloads.sha256
 
 # Baseline configuration (see build.md "Dev build" in the nscp repository):
 #  - generic check modules so `queries` / `modules` have something to work on,

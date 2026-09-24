@@ -37,11 +37,23 @@ $zipName = "NSCP-$version-$platform.zip"
 $zip = Join-Path (Split-Path $dir -Parent) $zipName
 $nscp = Join-Path $dir "nscp.exe"
 
+# Require a reviewed checksum before downloading or using a cached archive.
+$checksumPattern = '^[a-f0-9]{64}  ' + [regex]::Escape($zipName) + '$'
+$checksumEntries = @(Get-Content -LiteralPath (Join-Path $PSScriptRoot "downloads.sha256") |
+    Where-Object { $_ -match $checksumPattern })
+if ($checksumEntries.Count -ne 1) {
+    throw "Expected one checksum for $zipName in tests/integration/downloads.sha256; review and add it before testing a new release."
+}
+$expectedHash = $checksumEntries[0].Substring(0, 64)
+
 New-Item -ItemType Directory -Force (Split-Path $dir -Parent) | Out-Null
 if (-not (Test-Path $zip)) {
     $url = "https://github.com/mickem/nscp/releases/download/$version/$zipName"
     Write-Host "==> Downloading $url"
     Invoke-WebRequest -Uri $url -OutFile $zip
+}
+if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $expectedHash) {
+    throw "SHA-256 mismatch for $zipName; refusing to extract or execute it."
 }
 
 # Always start from a clean extraction so leftover settings from a previous run
@@ -88,7 +100,7 @@ try {
     $env:CHECK_NSCLIENT_IT_USERNAME = if ($env:NSCP_USERNAME) { $env:NSCP_USERNAME } else { "admin" }
     Push-Location $root
     try {
-        cargo test --test integration -- @CargoArgs
+        cargo test --locked --test integration -- @CargoArgs
         if ($LASTEXITCODE -ne 0) { throw "integration tests failed" }
     } finally {
         Pop-Location

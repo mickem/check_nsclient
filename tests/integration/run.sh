@@ -50,4 +50,4 @@ cd "$root"
 CHECK_NSCLIENT_IT_URL="https://127.0.0.1:${port}" \
 CHECK_NSCLIENT_IT_PASSWORD="${password}" \
 CHECK_NSCLIENT_IT_USERNAME="${NSCP_USERNAME:-admin}" \
-    cargo test --test integration -- "$@"
+    cargo test --locked --test integration -- "$@"
