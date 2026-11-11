@@ -20,6 +20,7 @@ $version = if ($env:NSCP_VERSION) { $env:NSCP_VERSION } else { (Get-Content (Joi
 $arch = if ($env:NSCP_ARCH) { $env:NSCP_ARCH } else { "amd64" }
 $password = if ($env:NSCP_PASSWORD) { $env:NSCP_PASSWORD } else { "it-password" }
 $port = if ($env:NSCP_PORT) { $env:NSCP_PORT } else { "8443" }
+$nrpePort = if ($env:NSCP_NRPE_PORT) { $env:NSCP_NRPE_PORT } else { "5666" }
 $image = "check_nsclient-it:$version-$arch"
 $container = "check_nsclient-it-$PID"
 
@@ -29,7 +30,7 @@ if ($LASTEXITCODE -ne 0) { throw "docker build failed" }
 
 try {
     Write-Host "==> Starting $container"
-    docker run -d --name $container -p "${port}:8443" $image | Out-Null
+    docker run -d --name $container -p "${port}:8443" -p "${nrpePort}:5666" $image | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "docker run failed" }
 
     Write-Host "==> Waiting for https://127.0.0.1:$port"
@@ -47,6 +48,7 @@ try {
 
     Write-Host "==> Running integration tests against NSClient++ $version"
     $env:CHECK_NSCLIENT_IT_URL = "https://127.0.0.1:$port"
+    $env:CHECK_NSCLIENT_IT_NRPE = "127.0.0.1:$nrpePort"
     $env:CHECK_NSCLIENT_IT_PASSWORD = $password
     $env:CHECK_NSCLIENT_IT_USERNAME = if ($env:NSCP_USERNAME) { $env:NSCP_USERNAME } else { "admin" }
     Push-Location $root

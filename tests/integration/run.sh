@@ -16,6 +16,7 @@ version="${NSCP_VERSION:-$(tr -d '[:space:]' < "$root/.nscp_version")}"
 arch="${NSCP_ARCH:-$(case "$(uname -m)" in aarch64|arm64) echo arm64;; *) echo amd64;; esac)}"
 password="${NSCP_PASSWORD:-it-password}"
 port="${NSCP_PORT:-8443}"
+nrpe_port="${NSCP_NRPE_PORT:-5666}"
 image="check_nsclient-it:${version}-${arch}"
 container="check_nsclient-it-$$"
 
@@ -34,7 +35,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Starting ${container}"
-docker run -d --name "${container}" -p "${port}:8443" "${image}" >/dev/null
+docker run -d --name "${container}" -p "${port}:8443" -p "${nrpe_port}:5666" "${image}" >/dev/null
 
 echo "==> Waiting for https://127.0.0.1:${port}"
 for _ in $(seq 1 60); do
@@ -48,6 +49,7 @@ done
 echo "==> Running integration tests against NSClient++ ${version}"
 cd "$root"
 CHECK_NSCLIENT_IT_URL="https://127.0.0.1:${port}" \
+CHECK_NSCLIENT_IT_NRPE="127.0.0.1:${nrpe_port}" \
 CHECK_NSCLIENT_IT_PASSWORD="${password}" \
 CHECK_NSCLIENT_IT_USERNAME="${NSCP_USERNAME:-admin}" \
     cargo test --locked --test integration -- "$@"

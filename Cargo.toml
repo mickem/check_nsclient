@@ -23,9 +23,16 @@ tui-prompts = "0.6.3"
 confy = "2.0.0"
 tokio-util = "0.7.18"
 rpassword = "7.5.4"
+# NRPE speaks TLS over a raw socket. These are the versions reqwest already
+# brings in, with the same crypto provider, so the client gains no second TLS
+# stack.
+rustls = { version = "0.23.35", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
+rustls-platform-verifier = "0.6.2"
 
 [dev-dependencies]
 wiremock = "0.6.5"
 mockall = "0.14"
 tempfile = "3.27.0"
 serial_test = "3.4.0"
+rcgen = { version = "0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }

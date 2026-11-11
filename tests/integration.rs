@@ -1695,3 +1695,161 @@ fn metrics_show() {
         "strings must not be json-quoted: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// NRPE
+// ---------------------------------------------------------------------------
+
+/// The NRPE listener of the server under test, as (host, port).
+///
+/// Separate from [`target`] because the listener is optional: the Windows
+/// runner does not enable it, and a server you started yourself may not have
+/// it either.
+fn nrpe_target() -> Option<(String, String)> {
+    let address = std::env::var("CHECK_NSCLIENT_IT_NRPE").ok()?;
+    let (host, port) = address
+        .rsplit_once(':')
+        .expect("CHECK_NSCLIENT_IT_NRPE must be host:port");
+    Some((host.to_string(), port.to_string()))
+}
+
+/// Skip the calling test unless an NRPE listener is configured; otherwise wait
+/// for exclusive access to the server it belongs to.
+macro_rules! require_nrpe {
+    () => {
+        match nrpe_target() {
+            Some(target) => (target, lock_server()),
+            None => {
+                eprintln!(
+                    "skipped: CHECK_NSCLIENT_IT_NRPE is not set (see tests/integration/README.md)"
+                );
+                return;
+            }
+        }
+    };
+}
+
+/// Run `check_nsclient [global] nrpe -H host -p port [args]`.
+///
+/// The `nrpe` command reports its own failures as an UNKNOWN on stdout, so a
+/// connection the busy agent refused shows up there; such a run is retried,
+/// for the reason given at [`dropped_the_connection`].
+fn nrpe(target: &(String, String), global: &[&str], args: &[&str]) -> Output {
+    for attempt in 1..=ATTEMPTS {
+        let out = Command::new(BIN)
+            .args(global)
+            .args(["nrpe", "-H", &target.0, "-p", &target.1])
+            .args(args)
+            .output()
+            .expect("failed to spawn check_nsclient");
+        let refused = stdout(&out).contains("UNKNOWN: failed to connect to");
+        if attempt == ATTEMPTS || !refused {
+            return out;
+        }
+        eprintln!("retrying nrpe `{}` (attempt {attempt})", args.join(" "));
+        std::thread::sleep(BACKOFF);
+    }
+    unreachable!("the loop returns on its last attempt")
+}
+
+#[test]
+fn nrpe_ping_answers_over_tls() {
+    let (target, _lock) = require_nrpe!();
+    for version in ["2", "4"] {
+        let out = nrpe(&target, &[], &["-k", "--protocol-version", version, "ping"]);
+        assert_success(&out, "nrpe ping");
+        assert!(
+            stdout(&out).contains("seem to be doing fine"),
+            "version {version}: {}",
+            stdout(&out)
+        );
+    }
+}
+
+#[test]
+fn nrpe_query_maps_the_result_to_the_exit_code() {
+    let (target, _lock) = require_nrpe!();
+    for (command, code) in [("check_ok", 0), ("check_warning", 1), ("check_critical", 2)] {
+        for version in ["2", "4"] {
+            let out = nrpe(
+                &target,
+                &[],
+                &[
+                    "-k",
+                    "--protocol-version",
+                    version,
+                    "query",
+                    command,
+                    "message=two words",
+                ],
+            );
+            assert_eq!(out.status.code(), Some(code), "{command} v{version}");
+            assert_eq!(stdout(&out), "two words\n", "{command} v{version}");
+        }
+    }
+}
+
+#[test]
+fn nrpe_query_renders_json() {
+    let (target, _lock) = require_nrpe!();
+    let out = nrpe(
+        &target,
+        &["--output", "json"],
+        &["-k", "query", "check_critical", "message=boom"],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let json: Value = serde_json::from_str(&stdout(&out)).expect("nrpe json");
+    assert_eq!(json["command"], "check_critical!message=boom");
+    assert_eq!(json["result"], "CRITICAL");
+    assert_eq!(json["output"], "boom");
+}
+
+/// An answer longer than one packet: NSClient++ splits it over several
+/// version 2 packets (`extended response`), and sends it whole in version 4.
+#[test]
+fn nrpe_reads_an_answer_longer_than_one_packet() {
+    let (target, _lock) = require_nrpe!();
+    let filler = "x".repeat(400);
+    let syntax = format!("detail-syntax=%(time) {filler}");
+    for version in ["2", "4"] {
+        let out = nrpe(
+            &target,
+            &[],
+            &[
+                "-k",
+                "--protocol-version",
+                version,
+                "query",
+                "check_cpu",
+                "show-all",
+                &syntax,
+            ],
+        );
+        let text = stdout(&out);
+        // check_cpu reports three time ranges, each rendered with the filler.
+        assert_eq!(text.matches(&filler).count(), 3, "v{version}: {text}");
+        assert!(text.len() > 1024, "v{version}: {} bytes", text.len());
+        assert!(text.contains("|'total 5s'="), "v{version}: {text}");
+    }
+}
+
+#[test]
+fn nrpe_reports_problems_as_unknown() {
+    let (target, _lock) = require_nrpe!();
+    // The server's certificate is self signed, so it only passes with -k.
+    let out = nrpe(&target, &[], &["ping"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        stdout(&out).starts_with("UNKNOWN: TLS handshake with "),
+        "{}",
+        stdout(&out)
+    );
+    // The listener speaks TLS only.
+    let out = nrpe(&target, &[], &["--no-tls", "ping"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(stdout(&out).starts_with("UNKNOWN: "), "{}", stdout(&out));
+    // An unknown command is the server's answer, passed on as it came.
+    let out = nrpe(&target, &[], &["-k", "query", "no_such_command"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(stdout(&out).contains("no_such_command"), "{}", stdout(&out));
+}

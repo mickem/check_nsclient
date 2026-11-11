@@ -169,6 +169,83 @@ pub enum ProfileCommands {
     Remove { id: String },
 }
 
+/// NRPE protocol version to speak
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NrpeProtocolVersion {
+    /// Fixed size packets; understood by every NRPE server
+    #[value(name = "2")]
+    V2,
+    /// Variable size packets, for queries and answers beyond the payload length
+    #[value(name = "4")]
+    V4,
+}
+
+#[derive(Subcommand)]
+pub enum NrpeCommand {
+    /// Check that the NRPE server answers (does not run a check)
+    Ping {},
+    /// Run a check (Nagios compatible output and exit code)
+    #[command(trailing_var_arg = true)]
+    Query {
+        /// The command to run, as the server knows it
+        command: String,
+        /// Arguments for the command (the server has to allow arguments)
+        #[arg(allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Args)]
+pub struct NrpeCommandOptions {
+    /// The host to connect to
+    #[arg(short = 'H', long)]
+    pub(crate) host: String,
+    /// The port the NRPE server listens on
+    #[arg(short, long, default_value_t = 5666)]
+    pub(crate) port: u16,
+    /// The timeout in seconds, for the whole exchange
+    #[arg(short, long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) timeout_s: u64,
+    /// The NRPE protocol version to speak
+    #[arg(long, value_enum, default_value_t = NrpeProtocolVersion::V2)]
+    pub(crate) protocol_version: NrpeProtocolVersion,
+    /// Payload length of a version 2 packet; has to match the server's `payload length`
+    #[arg(
+        long,
+        default_value_t = crate::nrpe::DEFAULT_PAYLOAD_LENGTH,
+        value_parser = parse_payload_length
+    )]
+    pub(crate) payload_length: usize,
+    /// Connect without TLS (for servers that have it turned off)
+    #[arg(long, conflicts_with_all = ["insecure", "ca", "certificate", "certificate_key"])]
+    pub(crate) no_tls: bool,
+    /// Do not verify the server certificate
+    #[arg(short = 'k', long)]
+    pub(crate) insecure: bool,
+    /// CA certificate(s) to trust besides the system's (PEM)
+    #[arg(long, value_name = "FILE")]
+    pub(crate) ca: Option<String>,
+    /// Client certificate to present (PEM), for servers that verify their clients
+    #[arg(long, value_name = "FILE", requires = "certificate_key")]
+    pub(crate) certificate: Option<String>,
+    /// Private key of the client certificate (PEM)
+    #[arg(long, value_name = "FILE", requires = "certificate")]
+    pub(crate) certificate_key: Option<String>,
+    /// The subcommand to run
+    #[command(subcommand)]
+    pub(crate) command: NrpeCommand,
+}
+
+fn parse_payload_length(raw: &str) -> Result<usize, String> {
+    use crate::nrpe::{MAX_PAYLOAD_LENGTH, MIN_PAYLOAD_LENGTH};
+    match raw.parse::<usize>() {
+        Ok(length) if (MIN_PAYLOAD_LENGTH..=MAX_PAYLOAD_LENGTH).contains(&length) => Ok(length),
+        _ => Err(format!(
+            "expected a number of bytes between {MIN_PAYLOAD_LENGTH} and {MAX_PAYLOAD_LENGTH}"
+        )),
+    }
+}
+
 // Parsed once per process, so the size of the largest sub command does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -176,6 +253,8 @@ pub enum Commands {
     /// Communicate with NSClient
     #[command(name = "nsclient")]
     NSClient(NSClientCommandOptions),
+    /// Run checks over NRPE (the check_nrpe protocol)
+    Nrpe(NrpeCommandOptions),
     /// Show version
     Version {},
     /// Manage profiles
@@ -828,6 +907,95 @@ mod tests {
         assert!(
             Cli::try_parse_from(["check_nsclient", "nsclient", "facts", "refresh", "os"]).is_err()
         );
+    }
+
+    fn nrpe_options(cli: Cli) -> NrpeCommandOptions {
+        match cli.command {
+            Commands::Nrpe(options) => options,
+            _ => panic!("expected the nrpe command"),
+        }
+    }
+
+    #[test]
+    fn nrpe_defaults_to_tls_on_the_standard_port() {
+        let options = nrpe_options(parse(&["nrpe", "-H", "host", "ping"]));
+        assert_eq!(options.host, "host");
+        assert_eq!(options.port, 5666);
+        assert_eq!(options.timeout_s, 10);
+        assert_eq!(options.protocol_version, NrpeProtocolVersion::V2);
+        assert_eq!(options.payload_length, 1024);
+        assert!(!options.no_tls);
+        assert!(!options.insecure);
+        assert!(matches!(options.command, NrpeCommand::Ping {}));
+    }
+
+    #[test]
+    fn nrpe_query_keeps_arguments_verbatim() {
+        let options = nrpe_options(parse(&[
+            "nrpe",
+            "--host",
+            "host",
+            "-p",
+            "15666",
+            "-t",
+            "30",
+            "--protocol-version",
+            "4",
+            "--payload-length",
+            "4096",
+            "-k",
+            "query",
+            "check_drivesize",
+            "crit=free<10%",
+            "--show-all",
+            "-p",
+        ]));
+        assert_eq!(options.port, 15666);
+        assert_eq!(options.timeout_s, 30);
+        assert_eq!(options.protocol_version, NrpeProtocolVersion::V4);
+        assert_eq!(options.payload_length, 4096);
+        assert!(options.insecure);
+        match options.command {
+            NrpeCommand::Query { command, args } => {
+                assert_eq!(command, "check_drivesize");
+                assert_eq!(args, ["crit=free<10%", "--show-all", "-p"]);
+            }
+            _ => panic!("expected query"),
+        }
+    }
+
+    #[test]
+    fn nrpe_rejects_inconsistent_options() {
+        let fails = |args: &[&str]| {
+            Cli::try_parse_from(
+                ["check_nsclient", "nrpe", "-H", "host"]
+                    .into_iter()
+                    .chain(args.iter().copied())
+                    .chain(["ping"]),
+            )
+            .is_err()
+        };
+        assert!(!fails(&[]));
+        assert!(!fails(&["--no-tls"]));
+        assert!(!fails(&[
+            "--certificate",
+            "c.pem",
+            "--certificate-key",
+            "k.pem"
+        ]));
+        // TLS settings make no sense without TLS.
+        assert!(fails(&["--no-tls", "--insecure"]));
+        assert!(fails(&["--no-tls", "--ca", "ca.pem"]));
+        // A certificate is no use without its key, and the other way around.
+        assert!(fails(&["--certificate", "c.pem"]));
+        assert!(fails(&["--certificate-key", "k.pem"]));
+        assert!(fails(&["--protocol-version", "3"]));
+        assert!(fails(&["--payload-length", "8"]));
+        assert!(fails(&["--payload-length", "lots"]));
+        assert!(fails(&["--timeout-s", "0"]));
+        // The host is not optional, and neither is the command to run.
+        assert!(Cli::try_parse_from(["check_nsclient", "nrpe", "ping"]).is_err());
+        assert!(Cli::try_parse_from(["check_nsclient", "nrpe", "-H", "host", "query"]).is_err());
     }
 
     #[test]
