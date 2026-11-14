@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod constants;
 mod debug;
+mod fleet;
 mod nagios;
 mod nrpe;
 mod nsclient;
@@ -10,6 +11,7 @@ mod rendering;
 mod tokens;
 
 use crate::cli::{Cli, Commands};
+use crate::fleet::route_fleet;
 use crate::nrpe::route_nrpe;
 use crate::nsclient::route_ns_client;
 use crate::profile::route_profile;
@@ -99,6 +101,14 @@ async fn main() -> anyhow::Result<()> {
             route_profile(
                 Rendering::new(cli.output, cli.output_style, cli.output_long, output_sink),
                 command,
+            )
+            .await?
+        }
+        Commands::Fleet(args) => {
+            let output_sink = Box::new(PrintRender::new());
+            route_fleet(
+                Rendering::new(cli.output, cli.output_style, cli.output_long, output_sink),
+                args,
             )
             .await?
         }

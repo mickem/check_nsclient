@@ -14,6 +14,18 @@ pub struct NSClientProfile {
     pub(crate) insecure: bool,
 }
 
+/// A fleet server to talk to. Kept apart from NSClient++ profiles: it is a different
+/// server with a different API, and its API key lives in the keyring under its own name.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FleetProfile {
+    pub(crate) id: String,
+    pub(crate) url: String,
+    #[serde(skip_serializing_if = "Option::is_none", default = "Option::default")]
+    pub(crate) ca: Option<String>,
+    #[serde(default)]
+    pub(crate) insecure: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct NSClientConfig {
     #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::default")]
@@ -21,6 +33,68 @@ struct NSClientConfig {
     default_nsclient_profile: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::default")]
     history: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default = "Vec::default")]
+    fleet_profiles: Vec<FleetProfile>,
+    #[serde(skip_serializing_if = "Option::is_none", default = "Option::default")]
+    default_fleet_profile: Option<String>,
+}
+
+/// The keyring name a fleet profile's API key is stored under. Prefixed so a fleet profile
+/// and an NSClient++ profile with the same id do not share a credential.
+fn fleet_key_id(id: &str) -> String {
+    format!("fleet-{id}")
+}
+
+pub fn add_fleet_profile(
+    id: &str,
+    url: &str,
+    insecure: bool,
+    api_key: &str,
+    ca: Option<String>,
+) -> anyhow::Result<()> {
+    let mut cfg: NSClientConfig = load_config()?;
+    cfg.fleet_profiles.retain(|p| p.id != id);
+    cfg.fleet_profiles.push(FleetProfile {
+        id: id.to_string(),
+        url: url.to_string(),
+        ca,
+        insecure,
+    });
+    if cfg.default_fleet_profile.is_none() {
+        cfg.default_fleet_profile = Some(id.to_string());
+    }
+    confy::store(SERVICE_NAME, None, cfg)?;
+    tokens::store_token(KeyType::Token, &fleet_key_id(id), api_key)
+}
+
+/// The fleet profile `id`, or the default one when no id is given. `None` when there is no
+/// such profile (or no default).
+pub fn get_fleet_profile(id: Option<&str>) -> anyhow::Result<Option<FleetProfile>> {
+    let cfg: NSClientConfig = load_config()?;
+    let Some(id) = id.map(str::to_string).or(cfg.default_fleet_profile) else {
+        return Ok(None);
+    };
+    Ok(cfg.fleet_profiles.into_iter().find(|p| p.id == id))
+}
+
+pub fn get_fleet_api_key(id: &str) -> anyhow::Result<String> {
+    match tokens::load_token(KeyType::Token, &fleet_key_id(id)) {
+        Ok(token) => Ok(token),
+        Err(e) => anyhow::bail!("Failed to load API key for fleet profile '{}': {:#}", id, e),
+    }
+}
+
+pub fn remove_fleet_profile(id: &str) -> anyhow::Result<()> {
+    let mut cfg: NSClientConfig = load_config()?;
+    let Some(pos) = cfg.fleet_profiles.iter().position(|p| p.id == id) else {
+        anyhow::bail!("Fleet profile with id '{}' does not exist", id);
+    };
+    cfg.fleet_profiles.remove(pos);
+    if cfg.default_fleet_profile.as_deref() == Some(id) {
+        cfg.default_fleet_profile = None;
+    }
+    confy::store(SERVICE_NAME, None, cfg)?;
+    tokens::clear_token(&fleet_key_id(id))
 }
 
 fn load_config() -> anyhow::Result<NSClientConfig> {
@@ -197,6 +271,41 @@ mod tests {
         assert!(!tokens::token_exists(KeyType::Token, "test1"));
         assert!(!tokens::token_exists(KeyType::Password, "test1"));
         assert!(get_api_key("test1").is_err());
+        drop(tmp);
+    }
+
+    #[test]
+    #[serial_test::serial(config)]
+    fn test_fleet_profiles_are_kept_apart_from_nsclient_profiles() {
+        let tmp = mock_test_config();
+        add_nsclient_profile(
+            "prod",
+            "https://agent:8443",
+            false,
+            "u",
+            "p",
+            "agent-key",
+            None,
+        )
+        .unwrap();
+        add_fleet_profile("prod", "https://fleet.example", false, "nsk_fleet", None).unwrap();
+
+        // The first fleet profile becomes the default.
+        let fleet = get_fleet_profile(None).unwrap().unwrap();
+        assert_eq!(fleet.id, "prod");
+        assert_eq!(fleet.url, "https://fleet.example");
+        assert_eq!(get_fleet_api_key("prod").unwrap(), "nsk_fleet");
+        assert_eq!(
+            get_api_key("prod").unwrap(),
+            "agent-key",
+            "a fleet profile must not overwrite an NSClient++ profile's key of the same id"
+        );
+
+        remove_fleet_profile("prod").unwrap();
+        assert!(get_fleet_profile(None).unwrap().is_none());
+        assert!(get_fleet_api_key("prod").is_err());
+        assert_eq!(get_api_key("prod").unwrap(), "agent-key");
+        assert!(get_nsclient_profile("prod").unwrap().is_some());
         drop(tmp);
     }
 

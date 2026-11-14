@@ -305,6 +305,75 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProfileCommands,
     },
+    /// Communicate with an NSClient++ fleet server
+    Fleet(FleetCommandOptions),
+}
+
+#[derive(Args)]
+pub struct FleetCommandOptions {
+    /// The timeout in seconds. Explaining an error waits on a language model, which can take
+    /// tens of seconds.
+    #[arg(short, long, default_value_t = 120)]
+    pub(crate) timeout_s: u64,
+    /// The fleet profile to use (see `fleet login`); the default profile when omitted
+    #[arg(short = 'p', long)]
+    pub(crate) profile: Option<String>,
+    /// Fleet server URL, instead of the profile's
+    #[arg(long, env = "FLEET_URL")]
+    pub(crate) url: Option<String>,
+    /// Fleet API key (nsk_…), instead of the profile's
+    #[arg(long, env = "FLEET_API_KEY", hide_env_values = true)]
+    pub(crate) api_key: Option<String>,
+    /// The subcommand to run
+    #[command(subcommand)]
+    pub(crate) command: FleetCommands,
+}
+
+#[derive(Subcommand)]
+pub enum FleetCommands {
+    /// Store a fleet server URL and API key as a profile
+    Login {
+        /// Profile ID to store the credentials under
+        #[arg(default_value = "default")]
+        id: String,
+        /// Fleet server URL, for example https://fleet.example.com
+        #[arg(long)]
+        url: String,
+        /// API key (nsk_…). Prompted for when omitted, so it stays out of shell history
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Allow insecure TLS connections
+        #[arg(long)]
+        insecure: bool,
+        /// Root CA certificate (PEM) to trust in addition to the system roots
+        #[arg(long)]
+        ca: Option<String>,
+    },
+    /// Remove a stored fleet profile and its API key
+    Logout {
+        /// Profile ID to remove
+        #[arg(default_value = "default")]
+        id: String,
+    },
+    /// Explain an error from your monitoring system using the host's latest snapshot and facts
+    ///
+    /// The error is the remaining arguments, joined by spaces, or standard input when none
+    /// are given (or the only one is `-`). For example, from a Nagios notification command:
+    ///
+    ///   check_nsclient fleet explain --host "$HOSTNAME$" --check "$SERVICEDESC$" "$SERVICEOUTPUT$"
+    #[command(trailing_var_arg = true)]
+    Explain {
+        /// The host the error is about: its hostname as the fleet knows it, or its id
+        #[arg(long)]
+        host: String,
+        /// The check the error is about: a command (check_drivesize) or an alias (disk_c).
+        /// Without it, a check named in the error is used if there is one
+        #[arg(long)]
+        check: Option<String>,
+        /// The error text
+        #[arg(allow_hyphen_values = true)]
+        error: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1067,6 +1136,44 @@ mod tests {
         // The host is not optional, and neither is the command to run.
         assert!(Cli::try_parse_from(["check_nsclient", "nrpe", "ping"]).is_err());
         assert!(Cli::try_parse_from(["check_nsclient", "nrpe", "-H", "host", "query"]).is_err());
+    }
+
+    #[test]
+    fn fleet_explain_takes_the_error_as_trailing_words() {
+        // Alert text is whatever the monitoring system wrote, leading dashes included.
+        let cli = parse(&[
+            "fleet",
+            "--url",
+            "https://fleet.example",
+            "explain",
+            "--host",
+            "web01",
+            "--check",
+            "disk_c",
+            "CRITICAL:",
+            "--",
+            "C:\\",
+            "-5%",
+        ]);
+        let Commands::Fleet(options) = cli.command else {
+            panic!("not a fleet command");
+        };
+        assert_eq!(options.url.as_deref(), Some("https://fleet.example"));
+        assert_eq!(options.timeout_s, 120, "long enough for a model to answer");
+        let FleetCommands::Explain { host, check, error } = options.command else {
+            panic!("not explain");
+        };
+        assert_eq!(host, "web01");
+        assert_eq!(check.as_deref(), Some("disk_c"));
+        assert_eq!(error, vec!["CRITICAL:", "--", "C:\\", "-5%"]);
+
+        let cli = parse(&["fleet", "explain", "--host", "web01"]);
+        assert!(
+            matches!(cli.command, Commands::Fleet(FleetCommandOptions {
+                command: FleetCommands::Explain { error, .. }, .. }) if error.is_empty()),
+            "no words: the error is read from standard input"
+        );
+        assert!(Cli::try_parse_from(["check_nsclient", "fleet", "explain", "boom"]).is_err());
     }
 
     #[test]
