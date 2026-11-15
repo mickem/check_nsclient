@@ -3,12 +3,14 @@ mod config;
 mod constants;
 mod debug;
 mod nagios;
+mod nrpe;
 mod nsclient;
 mod profile;
 mod rendering;
 mod tokens;
 
 use crate::cli::{Cli, Commands};
+use crate::nrpe::route_nrpe;
 use crate::nsclient::route_ns_client;
 use crate::profile::route_profile;
 use crate::rendering::{PrintRender, Rendering};
@@ -30,6 +32,18 @@ async fn main() -> anyhow::Result<()> {
             let output_sink = Box::new(PrintRender::new());
 
             let exit_code = route_ns_client(
+                Rendering::new(cli.output, cli.output_style, cli.output_long, output_sink),
+                args,
+            )
+            .await?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Commands::Nrpe(args) => {
+            let output_sink = Box::new(PrintRender::new());
+
+            let exit_code = route_nrpe(
                 Rendering::new(cli.output, cli.output_style, cli.output_long, output_sink),
                 args,
             )

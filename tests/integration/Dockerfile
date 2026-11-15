@@ -6,7 +6,7 @@
 # repository's own integration harness does.
 #
 #   docker build --build-arg NSCP_VERSION=0.18.0 -t check_nsclient-it tests/integration
-#   docker run --rm -p 8443:8443 check_nsclient-it
+#   docker run --rm -p 8443:8443 -p 5666:5666 check_nsclient-it
 #
 # The REST password is baked in as a build argument (default "it-password")
 # because this image only ever runs on a developer machine / CI runner and is
@@ -42,11 +42,14 @@ RUN set -eu; \
 # Baseline configuration (see build.md "Dev build" in the nscp repository):
 #  - generic check modules so `queries` / `modules` have something to work on,
 #  - LUAScript so `scripts list-runtimes` reports a runtime,
-#  - HTTPS REST API on 8443 with a CIDR allow-list ('*' does not resolve).
+#  - HTTPS REST API on 8443 with a CIDR allow-list ('*' does not resolve),
+#  - NRPE over TLS on 5666 for the `nrpe` command: the generated self-signed
+#    certificate, no client certificate demanded, arguments allowed.
 RUN nscp settings --load-all --list --add-defaults >/dev/null \
     && nscp settings --activate-module CheckHelpers CheckSystem CheckDisk CheckExternalScripts LUAScript \
-    && nscp web install --https --allowed-hosts '0.0.0.0/0,::/0' --password "${NSCP_PASSWORD}"
+    && nscp web install --https --allowed-hosts '0.0.0.0/0,::/0' --password "${NSCP_PASSWORD}" \
+    && nscp nrpe install --allowed-hosts='0.0.0.0/0,::/0' --insecure=false --verify=none --arguments=safe
 
-EXPOSE 8443
+EXPOSE 8443 5666
 
 CMD ["nscp", "test"]
