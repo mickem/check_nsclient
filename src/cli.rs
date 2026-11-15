@@ -169,6 +169,126 @@ pub enum ProfileCommands {
     Remove { id: String },
 }
 
+/// NRPE protocol version to speak
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NrpeProtocolVersion {
+    /// Fixed size packets; understood by every NRPE server
+    #[value(name = "2")]
+    V2,
+    /// Variable size packets, for queries and answers beyond the payload length
+    #[value(name = "4")]
+    V4,
+}
+
+#[derive(Subcommand)]
+pub enum NrpeCommand {
+    /// Check that the NRPE server answers (does not run a check)
+    Ping {},
+    /// Run a check (Nagios compatible output and exit code)
+    #[command(trailing_var_arg = true)]
+    Query {
+        /// The command to run, as the server knows it
+        command: String,
+        /// Arguments for the command (the server has to allow arguments)
+        #[arg(allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Args)]
+pub struct NrpeCommandOptions {
+    /// The host to connect to
+    #[arg(short = 'H', long)]
+    pub(crate) host: String,
+    /// The port the NRPE server listens on
+    #[arg(short, long, default_value_t = 5666)]
+    pub(crate) port: u16,
+    /// The timeout in seconds, for the whole exchange
+    #[arg(short, long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) timeout_s: u64,
+    /// The NRPE protocol version to speak
+    #[arg(long, value_enum, default_value_t = NrpeProtocolVersion::V2)]
+    pub(crate) protocol_version: NrpeProtocolVersion,
+    /// Payload length of a version 2 packet; has to match the server's `payload length`
+    #[arg(
+        long,
+        default_value_t = crate::nrpe::DEFAULT_PAYLOAD_LENGTH,
+        value_parser = parse_payload_length
+    )]
+    pub(crate) payload_length: usize,
+    /// Connect without TLS (for servers that have it turned off)
+    #[arg(
+        long,
+        conflicts_with_all = ["insecure", "ca", "server_name", "certificate", "certificate_key"]
+    )]
+    pub(crate) no_tls: bool,
+    /// Do not verify the server certificate
+    // Trusting a CA and trusting everybody are two different requests; taking
+    // both would mean quietly dropping one of them.
+    #[arg(short = 'k', long, conflicts_with = "ca")]
+    pub(crate) insecure: bool,
+    /// CA certificate(s) to trust besides the system's (PEM)
+    #[arg(long, value_name = "FILE")]
+    pub(crate) ca: Option<String>,
+    /// Name the server certificate must be valid for, if not the host connected to
+    #[arg(long, value_name = "NAME")]
+    pub(crate) server_name: Option<String>,
+    /// Client certificate to present (PEM), for servers that verify their clients
+    #[arg(long, value_name = "FILE", requires = "certificate_key")]
+    pub(crate) certificate: Option<String>,
+    /// Private key of the client certificate (PEM)
+    #[arg(long, value_name = "FILE", requires = "certificate")]
+    pub(crate) certificate_key: Option<String>,
+    /// The subcommand to run
+    #[command(subcommand)]
+    pub(crate) command: NrpeCommand,
+}
+
+/// Was the `nrpe` command asked for? Answered from the raw arguments, because
+/// it is needed exactly when parsing them failed: a usage error of `nrpe` has
+/// to end the way a Nagios plugin ends, not the way clap ends.
+pub fn is_nrpe_invocation(args: impl IntoIterator<Item = String>) -> bool {
+    use clap::CommandFactory;
+    let cli = Cli::command();
+    // Does the top level option matching `found` consume the next argument?
+    let takes_value = |found: &dyn Fn(&clap::Arg) -> bool| {
+        cli.get_arguments()
+            .any(|arg| found(arg) && arg.get_action().takes_values())
+    };
+    let mut args = args.into_iter();
+    // The sub command is the first argument that is neither an option nor the
+    // value of one.
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return args.next().as_deref() == Some("nrpe");
+        } else if let Some(long) = arg.strip_prefix("--") {
+            if !long.contains('=') && takes_value(&|a| a.get_long() == Some(long)) {
+                args.next();
+            }
+        } else if let Some(shorts) = arg.strip_prefix('-').filter(|s| !s.is_empty()) {
+            // In a cluster such as `-dd` only the last flag can take a value
+            // from the next argument.
+            let last = shorts.chars().last();
+            if takes_value(&|a| a.get_short() == last) {
+                args.next();
+            }
+        } else {
+            return arg == "nrpe";
+        }
+    }
+    false
+}
+
+fn parse_payload_length(raw: &str) -> Result<usize, String> {
+    use crate::nrpe::{MAX_PAYLOAD_LENGTH, MIN_PAYLOAD_LENGTH};
+    match raw.parse::<usize>() {
+        Ok(length) if (MIN_PAYLOAD_LENGTH..=MAX_PAYLOAD_LENGTH).contains(&length) => Ok(length),
+        _ => Err(format!(
+            "expected a number of bytes between {MIN_PAYLOAD_LENGTH} and {MAX_PAYLOAD_LENGTH}"
+        )),
+    }
+}
+
 // Parsed once per process, so the size of the largest sub command does not matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -176,6 +296,8 @@ pub enum Commands {
     /// Communicate with NSClient
     #[command(name = "nsclient")]
     NSClient(NSClientCommandOptions),
+    /// Run checks over NRPE (the check_nrpe protocol)
+    Nrpe(NrpeCommandOptions),
     /// Show version
     Version {},
     /// Manage profiles
@@ -828,6 +950,123 @@ mod tests {
         assert!(
             Cli::try_parse_from(["check_nsclient", "nsclient", "facts", "refresh", "os"]).is_err()
         );
+    }
+
+    fn nrpe_options(cli: Cli) -> NrpeCommandOptions {
+        match cli.command {
+            Commands::Nrpe(options) => options,
+            _ => panic!("expected the nrpe command"),
+        }
+    }
+
+    #[test]
+    fn nrpe_defaults_to_tls_on_the_standard_port() {
+        let options = nrpe_options(parse(&["nrpe", "-H", "host", "ping"]));
+        assert_eq!(options.host, "host");
+        assert_eq!(options.port, 5666);
+        assert_eq!(options.timeout_s, 10);
+        assert_eq!(options.protocol_version, NrpeProtocolVersion::V2);
+        assert_eq!(options.payload_length, 1024);
+        assert!(!options.no_tls);
+        assert!(!options.insecure);
+        assert!(options.server_name.is_none());
+        assert!(matches!(options.command, NrpeCommand::Ping {}));
+    }
+
+    #[test]
+    fn nrpe_query_keeps_arguments_verbatim() {
+        let options = nrpe_options(parse(&[
+            "nrpe",
+            "--host",
+            "host",
+            "-p",
+            "15666",
+            "-t",
+            "30",
+            "--protocol-version",
+            "4",
+            "--payload-length",
+            "4096",
+            "-k",
+            "query",
+            "check_drivesize",
+            "crit=free<10%",
+            "--show-all",
+            "-p",
+        ]));
+        assert_eq!(options.port, 15666);
+        assert_eq!(options.timeout_s, 30);
+        assert_eq!(options.protocol_version, NrpeProtocolVersion::V4);
+        assert_eq!(options.payload_length, 4096);
+        assert!(options.insecure);
+        match options.command {
+            NrpeCommand::Query { command, args } => {
+                assert_eq!(command, "check_drivesize");
+                assert_eq!(args, ["crit=free<10%", "--show-all", "-p"]);
+            }
+            _ => panic!("expected query"),
+        }
+    }
+
+    #[test]
+    fn nrpe_invocation_is_recognised_from_raw_arguments() {
+        let is_nrpe = |args: &[&str]| is_nrpe_invocation(args.iter().map(|a| a.to_string()));
+        assert!(is_nrpe(&["nrpe"]));
+        assert!(is_nrpe(&["nrpe", "--no-such-option"]));
+        assert!(is_nrpe(&["-dd", "--output", "json", "nrpe", "-H"]));
+        assert!(is_nrpe(&["--output=json", "--wsl", "nrpe"]));
+        assert!(is_nrpe(&[
+            "--output-style",
+            "blank",
+            "--output-long",
+            "nrpe"
+        ]));
+        assert!(is_nrpe(&["--", "nrpe"]));
+        assert!(!is_nrpe(&[]));
+        assert!(!is_nrpe(&["--output", "json"]));
+        assert!(!is_nrpe(&["nsclient", "nrpe"]));
+        // Here `nrpe` is the value of --output, not the command.
+        assert!(!is_nrpe(&["--output", "nrpe", "nsclient"]));
+        assert!(!is_nrpe(&["profile", "show", "nrpe"]));
+    }
+
+    #[test]
+    fn nrpe_rejects_inconsistent_options() {
+        let fails = |args: &[&str]| {
+            Cli::try_parse_from(
+                ["check_nsclient", "nrpe", "-H", "host"]
+                    .into_iter()
+                    .chain(args.iter().copied())
+                    .chain(["ping"]),
+            )
+            .is_err()
+        };
+        assert!(!fails(&[]));
+        assert!(!fails(&["--no-tls"]));
+        assert!(!fails(&[
+            "--certificate",
+            "c.pem",
+            "--certificate-key",
+            "k.pem"
+        ]));
+        assert!(!fails(&["--ca", "ca.pem", "--server-name", "agent"]));
+        assert!(!fails(&["--insecure", "--server-name", "agent"]));
+        // TLS settings make no sense without TLS.
+        assert!(fails(&["--no-tls", "--insecure"]));
+        assert!(fails(&["--no-tls", "--ca", "ca.pem"]));
+        assert!(fails(&["--no-tls", "--server-name", "agent"]));
+        // Either a CA is trusted or everybody is.
+        assert!(fails(&["--insecure", "--ca", "ca.pem"]));
+        // A certificate is no use without its key, and the other way around.
+        assert!(fails(&["--certificate", "c.pem"]));
+        assert!(fails(&["--certificate-key", "k.pem"]));
+        assert!(fails(&["--protocol-version", "3"]));
+        assert!(fails(&["--payload-length", "8"]));
+        assert!(fails(&["--payload-length", "lots"]));
+        assert!(fails(&["--timeout-s", "0"]));
+        // The host is not optional, and neither is the command to run.
+        assert!(Cli::try_parse_from(["check_nsclient", "nrpe", "ping"]).is_err());
+        assert!(Cli::try_parse_from(["check_nsclient", "nrpe", "-H", "host", "query"]).is_err());
     }
 
     #[test]

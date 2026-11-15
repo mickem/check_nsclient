@@ -3,7 +3,7 @@
 End-to-end tests that run the **built `check_nsclient` binary** against a **real
 NSClient++** and exercise every CLI feature: login/refresh/logout, profiles,
 ping/version, modules, queries (incl. Nagios exit codes), logs, scripts,
-settings, metrics and all output formats. They mirror the harness in the
+settings, metrics, NRPE and all output formats. They mirror the harness in the
 [nscp repository](https://github.com/mickem/nscp/tree/master/tests) but stay
 in Rust/cargo.
 
@@ -42,7 +42,8 @@ tests\integration\run.ps1                      # Docker Desktop, Linux container
 ```
 
 The script builds `tests/integration/Dockerfile` (Ubuntu 24.04 + the official
-`.deb` from the nscp GitHub release), starts it on port 8443, runs
+`.deb` from the nscp GitHub release), starts it on port 8443 (REST) and 5666
+(NRPE), runs
 `cargo test --locked --test integration` and removes the container again.
 
 | Variable        | Default              | Purpose                                 |
@@ -51,6 +52,7 @@ The script builds `tests/integration/Dockerfile` (Ubuntu 24.04 + the official
 | `NSCP_ARCH`     | host arch            | `amd64` or `arm64` package              |
 | `NSCP_PASSWORD` | `it-password`        | REST password baked into the image      |
 | `NSCP_PORT`     | `8443`               | Host port the container is published on |
+| `NSCP_NRPE_PORT`| `5666`               | Host port NRPE is published on          |
 
 ## Native Windows (release zip, no Docker)
 
@@ -80,8 +82,16 @@ Set the target directly and run the test binary; nothing is built or started:
 CHECK_NSCLIENT_IT_URL=https://127.0.0.1:8443 \
 CHECK_NSCLIENT_IT_USERNAME=admin \
 CHECK_NSCLIENT_IT_PASSWORD=secret \
+CHECK_NSCLIENT_IT_NRPE=127.0.0.1:5666 \
   cargo test --locked --test integration
 ```
+
+`CHECK_NSCLIENT_IT_NRPE` is optional and independent of the others: the NRPE
+tests are skipped without it and need nothing but it. They expect NRPE over TLS
+with arguments allowed and no client certificate demanded (`nscp nrpe install
+--insecure=false --verify=none --arguments=safe`), plus `CheckHelpers` and
+`CheckSystem`. The Docker image is set up that way; the native Windows runner
+does not enable NRPE, so the NRPE tests are skipped there.
 
 The server needs the REST API (WEBServer) enabled with the `CheckHelpers`,
 `CheckSystem`, `CheckDisk`, `CheckExternalScripts` and `LUAScript` modules
