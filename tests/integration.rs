@@ -1781,9 +1781,10 @@ fn nrpe_usage_errors_are_unknown_not_critical() {
         let out = run(args);
         assert_eq!(out.status.code(), Some(3), "{args:?}");
         assert_eq!(stdout(&out), reason, "{args:?}");
-        // The usage is still there for whoever runs it by hand.
+        // The usage is still there for whoever runs it by hand. The program
+        // name in it is `check_nsclient.exe` on Windows, hence the prefix.
         assert!(
-            stderr(&out).contains("Usage: check_nsclient nrpe"),
+            stderr(&out).contains("Usage: check_nsclient"),
             "{args:?}"
         );
     }
