@@ -127,12 +127,19 @@ jobs:
       - name: Cache dependencies
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
+          # ~/.cargo/bin holds the installed cargo-cyclonedx. The two .crates
+          # files are cargo's record of what it installed there: without them a
+          # restored binary makes `cargo install` fail with "binary already
+          # exists" instead of recognising it. The v2 in the key retires the
+          # caches that were saved without them.
           path: |
             ~/.cargo/bin
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-v2-${{ hashFiles('Cargo.lock') }}
 
       - name: Set Version
         shell: bash
