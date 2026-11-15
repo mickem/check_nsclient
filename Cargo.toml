@@ -11,7 +11,7 @@ tokio = { version = "1.52.3", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
-tabled = "0.20.0"
+tabled = "0.22.0"
 anyhow = "1.0.102"
 csv = "1.4.0"
 indexmap = { version = "2.14.0", features = ["serde"] }
@@ -32,7 +32,7 @@ rustls-platform-verifier = "0.7.1"
 
 [dev-dependencies]
 wiremock = "0.6.5"
-mockall = "0.14"
+mockall = "0.15"
 tempfile = "3.27.0"
-serial_test = "3.4.0"
-rcgen = { version = "0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
+serial_test = "4.0.1"
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }
