@@ -35,6 +35,9 @@ pub struct TlsOptions {
     pub insecure: bool,
     /// Extra CA certificates (PEM) to trust besides the system's.
     pub ca: Option<String>,
+    /// The name the server certificate has to be valid for (and that is sent
+    /// as SNI), when that is not the host we connect to.
+    pub server_name: Option<String>,
     /// Client certificate chain (PEM), for servers that ask for one.
     pub certificate: Option<String>,
     /// Private key (PEM) of `certificate`.
@@ -166,8 +169,14 @@ async fn exchange<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    stream.write_all(request).await?;
-    stream.flush().await?;
+    // A server that drops the connection right after accepting it can do so
+    // before the query is out, in which case it is the write that fails.
+    async {
+        stream.write_all(request).await?;
+        stream.flush().await
+    }
+    .await
+    .map_err(|e| explain_no_answer(e.into()))?;
     debug::log(2, format!("Sent a {} byte query", request.len()));
 
     let mut output = Vec::new();
@@ -222,10 +231,12 @@ fn explain_no_answer(error: anyhow::Error) -> anyhow::Error {
                 ErrorKind::UnexpectedEof
                     | ErrorKind::ConnectionReset
                     | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
             )
         });
     // With TLS 1.3 a server that wants a client certificate lets the handshake
-    // through and refuses afterwards, so this arrives with the first read.
+    // through and refuses afterwards, so this arrives with the first read (or
+    // with the write, if the refusal is quicker than we are).
     if format!("{error:#}").contains("CertificateRequired") {
         return anyhow!(
             "the server demands a client certificate (--certificate and --certificate-key)"
@@ -262,8 +273,9 @@ pub async fn query(options: &ConnectionOptions, payload: &str) -> anyhow::Result
     let tls = match &options.tls {
         Some(tls) => {
             let config = tls_config(tls)?;
-            let name = ServerName::try_from(options.host.clone())
-                .with_context(|| format!("'{}' is not a valid host name", options.host))?;
+            let name = tls.server_name.as_ref().unwrap_or(&options.host);
+            let name = ServerName::try_from(name.clone())
+                .with_context(|| format!("'{name}' is not a valid host name"))?;
             Some((TlsConnector::from(Arc::new(config)), name))
         }
         None => None,
@@ -282,7 +294,8 @@ pub async fn query(options: &ConnectionOptions, payload: &str) -> anyhow::Result
                 let stream = connector.connect(name, tcp).await.with_context(|| {
                     format!(
                         "TLS handshake with {address} failed (--no-tls talks to a server without \
-                         TLS, --insecure accepts a certificate that cannot be verified; legacy \
+                         TLS, --server-name gives the name the certificate was issued for, \
+                         --insecure accepts a certificate that cannot be verified; legacy \
                          servers that only offer anonymous ADH ciphers are not supported)"
                     )
                 })?;
@@ -546,6 +559,60 @@ mod tests {
         assert_eq!(response.output, "OK: check_cpu");
     }
 
+    /// The certificate is for `localhost`; connecting by address only works
+    /// when told which name to hold the certificate to.
+    #[tokio::test]
+    async fn server_name_overrides_the_host_for_verification() {
+        let identity = identity();
+        let by_address = |port, server_name: Option<&str>| {
+            let mut options = options(
+                port,
+                ProtocolVersion::V2,
+                Some(TlsOptions {
+                    ca: path(&identity.certificate_file),
+                    server_name: server_name.map(str::to_string),
+                    ..TlsOptions::default()
+                }),
+            );
+            options.host = "127.0.0.1".into();
+            options
+        };
+
+        let port = server(Some(acceptor(&identity, None)), echo).await;
+        let err = query(&by_address(port, None), "check_cpu")
+            .await
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.starts_with("TLS handshake with 127.0.0.1:"), "{err}");
+        assert!(err.contains("--server-name"), "{err}");
+
+        let port = server(Some(acceptor(&identity, None)), echo).await;
+        let response = query(&by_address(port, Some("localhost")), "check_cpu")
+            .await
+            .unwrap();
+        assert_eq!(response.output, "OK: check_cpu");
+
+        let err = query(&by_address(1, Some("not a name")), "check_cpu")
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "'not a name' is not a valid host name");
+    }
+
+    /// The peer is gone before the query is written: the write fails, and it
+    /// has to be explained like the read that usually fails instead.
+    #[tokio::test]
+    async fn explains_a_connection_closed_before_the_query_is_sent() {
+        let (ours, theirs) = tokio::io::duplex(64);
+        drop(theirs);
+        let request = encode_v2(TYPE_QUERY, QUERY_RESULT_CODE, b"check_cpu", 1024).unwrap();
+        let err = exchange(ours, &request, 1024).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("the server closed the connection without answering"),
+            "{err:#}"
+        );
+    }
+
     #[tokio::test]
     async fn tls_rejects_an_unknown_certificate() {
         let identity = identity();
@@ -585,10 +652,10 @@ mod tests {
         )
         .await;
         let tls = TlsOptions {
-            insecure: false,
             ca: path(&server_identity.certificate_file),
             certificate: path(&client_identity.certificate_file),
             certificate_key: path(&client_identity.key_file),
+            ..TlsOptions::default()
         };
         let response = query(&options(port, ProtocolVersion::V2, Some(tls)), "check_cpu")
             .await

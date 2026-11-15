@@ -203,6 +203,12 @@ pub async fn read_packet<R: AsyncRead + Unpin>(
             packet.resize(V4_HEADER + buffer_length, 0);
             reader.read_exact(&mut packet[V4_HEADER..]).await?;
         }
+        // A real NRPE answer, just not one we read: saying "TLS?" here would
+        // send the reader looking in the wrong place.
+        3 => bail!(
+            "the server answered in NRPE version 3, which this client does not read; \
+             it speaks versions 2 and 4"
+        ),
         other => bail!(
             "the answer is not NRPE version 2 or 4 (it starts with version {other}); \
              is TLS enabled on one side only?"
@@ -356,6 +362,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not NRPE version 2 or 4"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn names_a_version_3_answer_for_what_it_is() {
+        let err = decode(&[0, 3, 0, 2, 0, 0, 0, 0, 0, 0], 1024)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NRPE version 3"), "{err}");
+        assert!(!err.contains("TLS"), "{err}");
     }
 
     #[tokio::test]

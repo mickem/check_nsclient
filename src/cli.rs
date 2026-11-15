@@ -217,14 +217,22 @@ pub struct NrpeCommandOptions {
     )]
     pub(crate) payload_length: usize,
     /// Connect without TLS (for servers that have it turned off)
-    #[arg(long, conflicts_with_all = ["insecure", "ca", "certificate", "certificate_key"])]
+    #[arg(
+        long,
+        conflicts_with_all = ["insecure", "ca", "server_name", "certificate", "certificate_key"]
+    )]
     pub(crate) no_tls: bool,
     /// Do not verify the server certificate
-    #[arg(short = 'k', long)]
+    // Trusting a CA and trusting everybody are two different requests; taking
+    // both would mean quietly dropping one of them.
+    #[arg(short = 'k', long, conflicts_with = "ca")]
     pub(crate) insecure: bool,
     /// CA certificate(s) to trust besides the system's (PEM)
     #[arg(long, value_name = "FILE")]
     pub(crate) ca: Option<String>,
+    /// Name the server certificate must be valid for, if not the host connected to
+    #[arg(long, value_name = "NAME")]
+    pub(crate) server_name: Option<String>,
     /// Client certificate to present (PEM), for servers that verify their clients
     #[arg(long, value_name = "FILE", requires = "certificate_key")]
     pub(crate) certificate: Option<String>,
@@ -234,6 +242,41 @@ pub struct NrpeCommandOptions {
     /// The subcommand to run
     #[command(subcommand)]
     pub(crate) command: NrpeCommand,
+}
+
+/// Was the `nrpe` command asked for? Answered from the raw arguments, because
+/// it is needed exactly when parsing them failed: a usage error of `nrpe` has
+/// to end the way a Nagios plugin ends, not the way clap ends.
+pub fn is_nrpe_invocation(args: impl IntoIterator<Item = String>) -> bool {
+    use clap::CommandFactory;
+    let cli = Cli::command();
+    // Does the top level option matching `found` consume the next argument?
+    let takes_value = |found: &dyn Fn(&clap::Arg) -> bool| {
+        cli.get_arguments()
+            .any(|arg| found(arg) && arg.get_action().takes_values())
+    };
+    let mut args = args.into_iter();
+    // The sub command is the first argument that is neither an option nor the
+    // value of one.
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return args.next().as_deref() == Some("nrpe");
+        } else if let Some(long) = arg.strip_prefix("--") {
+            if !long.contains('=') && takes_value(&|a| a.get_long() == Some(long)) {
+                args.next();
+            }
+        } else if let Some(shorts) = arg.strip_prefix('-').filter(|s| !s.is_empty()) {
+            // In a cluster such as `-dd` only the last flag can take a value
+            // from the next argument.
+            let last = shorts.chars().last();
+            if takes_value(&|a| a.get_short() == last) {
+                args.next();
+            }
+        } else {
+            return arg == "nrpe";
+        }
+    }
+    false
 }
 
 fn parse_payload_length(raw: &str) -> Result<usize, String> {
@@ -926,6 +969,7 @@ mod tests {
         assert_eq!(options.payload_length, 1024);
         assert!(!options.no_tls);
         assert!(!options.insecure);
+        assert!(options.server_name.is_none());
         assert!(matches!(options.command, NrpeCommand::Ping {}));
     }
 
@@ -965,6 +1009,28 @@ mod tests {
     }
 
     #[test]
+    fn nrpe_invocation_is_recognised_from_raw_arguments() {
+        let is_nrpe = |args: &[&str]| is_nrpe_invocation(args.iter().map(|a| a.to_string()));
+        assert!(is_nrpe(&["nrpe"]));
+        assert!(is_nrpe(&["nrpe", "--no-such-option"]));
+        assert!(is_nrpe(&["-dd", "--output", "json", "nrpe", "-H"]));
+        assert!(is_nrpe(&["--output=json", "--wsl", "nrpe"]));
+        assert!(is_nrpe(&[
+            "--output-style",
+            "blank",
+            "--output-long",
+            "nrpe"
+        ]));
+        assert!(is_nrpe(&["--", "nrpe"]));
+        assert!(!is_nrpe(&[]));
+        assert!(!is_nrpe(&["--output", "json"]));
+        assert!(!is_nrpe(&["nsclient", "nrpe"]));
+        // Here `nrpe` is the value of --output, not the command.
+        assert!(!is_nrpe(&["--output", "nrpe", "nsclient"]));
+        assert!(!is_nrpe(&["profile", "show", "nrpe"]));
+    }
+
+    #[test]
     fn nrpe_rejects_inconsistent_options() {
         let fails = |args: &[&str]| {
             Cli::try_parse_from(
@@ -983,9 +1049,14 @@ mod tests {
             "--certificate-key",
             "k.pem"
         ]));
+        assert!(!fails(&["--ca", "ca.pem", "--server-name", "agent"]));
+        assert!(!fails(&["--insecure", "--server-name", "agent"]));
         // TLS settings make no sense without TLS.
         assert!(fails(&["--no-tls", "--insecure"]));
         assert!(fails(&["--no-tls", "--ca", "ca.pem"]));
+        assert!(fails(&["--no-tls", "--server-name", "agent"]));
+        // Either a CA is trusted or everybody is.
+        assert!(fails(&["--insecure", "--ca", "ca.pem"]));
         // A certificate is no use without its key, and the other way around.
         assert!(fails(&["--certificate", "c.pem"]));
         assert!(fails(&["--certificate-key", "k.pem"]));

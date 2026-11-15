@@ -10,7 +10,7 @@ mod client;
 mod packet;
 
 use crate::cli::{NrpeCommand, NrpeCommandOptions, NrpeProtocolVersion};
-use crate::nrpe::client::{ConnectionOptions, ProtocolVersion, Response, TlsOptions};
+use crate::nrpe::client::{ConnectionOptions, ProtocolVersion, TlsOptions};
 use crate::rendering::Rendering;
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -73,6 +73,7 @@ fn connection_options(args: &NrpeCommandOptions) -> ConnectionOptions {
         tls: (!args.no_tls).then(|| TlsOptions {
             insecure: args.insecure,
             ca: args.ca.clone(),
+            server_name: args.server_name.clone(),
             certificate: args.certificate.clone(),
             certificate_key: args.certificate_key.clone(),
         }),
@@ -117,24 +118,38 @@ fn render(output: &Rendering, command: &str, code: i32, text: &str) -> anyhow::R
 /// Route an `nrpe` sub command and return the process exit code, which is the
 /// Nagios status of the check (or UNKNOWN when it could not be run).
 pub async fn route_nrpe(output: Rendering, args: &NrpeCommandOptions) -> anyhow::Result<i32> {
-    let outcome: anyhow::Result<(String, Response)> = async {
-        let payload = payload(&args.command)?;
-        let response = client::query(&connection_options(args), &payload).await?;
-        Ok((payload, response))
-    }
-    .await;
-    match outcome {
-        Ok((payload, response)) => {
-            let code = exit_code(response.result_code);
-            render(&output, &payload, code, &response.output)?;
-            Ok(code)
+    // What is reported as `command` is what went on the wire, whether or not
+    // the query then succeeded. Only a command that cannot be put on the wire
+    // at all is reported by the name it was given.
+    let (command, outcome) = match payload(&args.command) {
+        Ok(payload) => {
+            let outcome = client::query(&connection_options(args), &payload).await;
+            (payload, outcome)
         }
         Err(e) => {
-            let command = match &args.command {
+            let name = match &args.command {
                 NrpeCommand::Ping {} => PING_COMMAND,
                 NrpeCommand::Query { command, .. } => command,
             };
-            render(&output, command, UNKNOWN, &format!("UNKNOWN: {e:#}"))?;
+            (name.to_string(), Err(e))
+        }
+    };
+    // A status without a word of output is no check result: Nagios would show
+    // an empty line next to it. `check_nrpe` reports that as UNKNOWN too.
+    let outcome = outcome.and_then(|response| {
+        if response.output.trim().is_empty() {
+            anyhow::bail!("the server returned no output");
+        }
+        Ok(response)
+    });
+    match outcome {
+        Ok(response) => {
+            let code = exit_code(response.result_code);
+            render(&output, &command, code, &response.output)?;
+            Ok(code)
+        }
+        Err(e) => {
+            render(&output, &command, UNKNOWN, &format!("UNKNOWN: {e:#}"))?;
             Ok(UNKNOWN)
         }
     }
@@ -159,6 +174,7 @@ mod tests {
             no_tls: true,
             insecure: false,
             ca: None,
+            server_name: None,
             certificate: None,
             certificate_key: None,
             command,
@@ -175,14 +191,22 @@ mod tests {
     /// A plain text server that answers one query with `result_code` and the
     /// query it was sent.
     async fn server(result_code: i16) -> u16 {
+        answering(result_code, |query| {
+            [b"got ".as_slice(), query, b"|'a'=1"].concat()
+        })
+        .await
+    }
+
+    /// A plain text server that answers one query with `result_code` and
+    /// whatever `text` makes of the query.
+    async fn answering(result_code: i16, text: fn(&[u8]) -> Vec<u8>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (mut tcp, _) = listener.accept().await.unwrap();
             let query = read_packet(&mut tcp, 1024).await.unwrap();
-            let text = [b"got ".as_slice(), &query.payload, b"|'a'=1"].concat();
-            let answer = encode_v2(TYPE_RESPONSE, result_code, &text, 1024).unwrap();
-            tcp.write_all(&answer).await.unwrap();
+            let answer = encode_v2(TYPE_RESPONSE, result_code, &text(&query.payload), 1024);
+            tcp.write_all(&answer.unwrap()).await.unwrap();
         });
         port
     }
@@ -227,6 +251,7 @@ mod tests {
         args.no_tls = false;
         args.insecure = true;
         args.ca = Some("ca.pem".into());
+        args.server_name = Some("agent.example".into());
         args.protocol_version = NrpeProtocolVersion::V4;
         args.timeout_s = 3;
         let options = connection_options(&args);
@@ -235,6 +260,7 @@ mod tests {
         let tls = options.tls.expect("TLS is the default");
         assert!(tls.insecure);
         assert_eq!(tls.ca.as_deref(), Some("ca.pem"));
+        assert_eq!(tls.server_name.as_deref(), Some("agent.example"));
     }
 
     #[tokio::test]
@@ -271,6 +297,35 @@ mod tests {
                 "output": "got check_cpu|'a'=1",
             })
         );
+    }
+
+    #[tokio::test]
+    async fn an_answer_without_output_is_unknown() {
+        for text in [|_: &[u8]| Vec::new(), |_: &[u8]| b" \n".to_vec()] {
+            // The server says OK, but has nothing to show for it.
+            let port = answering(0, text).await;
+            let (code, text) = run(OutputFormat::Text, &args(port, query("check_cpu", &[]))).await;
+            assert_eq!(code, 3);
+            assert_eq!(text, "UNKNOWN: the server returned no output\n");
+        }
+    }
+
+    /// The `command` field is the wire payload on failure as it is on success.
+    #[tokio::test]
+    async fn a_failed_query_is_reported_with_its_arguments() {
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let (code, text) = run(
+            OutputFormat::Json,
+            &args(port, query("check_cpu", &["warn=80"])),
+        )
+        .await;
+        assert_eq!(code, 3);
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["command"], "check_cpu!warn=80");
+        assert_eq!(json["result"], "UNKNOWN");
     }
 
     #[tokio::test]

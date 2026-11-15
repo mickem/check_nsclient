@@ -23,18 +23,25 @@ inside an argument splits it in two, as it does with `check_nrpe -a`.
 The command is meant to be used as a check command. It prints the plugin output
 the server sent and exits with the status of the check: 0 OK, 1 WARNING,
 2 CRITICAL, 3 UNKNOWN. Anything that prevents the check from running -- a
-refused connection, a failed handshake, a timeout -- is printed as
-`UNKNOWN: <reason>` on stdout and also exits with 3.
+refused connection, a failed handshake, a timeout, an answer without any
+output, an option that does not parse -- is printed as `UNKNOWN: <reason>` on
+stdout and also exits with 3. It never exits with 1 or 2 on its own account, so
+a typo in a command definition cannot show up as a WARNING or CRITICAL host.
 
 ```
 define command {
     command_name check_nrpe
-    command_line /usr/bin/check_nsclient nrpe -H $HOSTADDRESS$ --ca /etc/nagios/nscp-ca.pem query $ARG1$
+    command_line /usr/bin/check_nsclient nrpe -H $HOSTADDRESS$ --server-name $HOSTNAME$ --ca /etc/nagios/nscp-ca.pem query $ARG1$
 }
 ```
 
-`--output json`, `yaml` and `csv` give `command`, `result` (the status by name)
-and `output` instead; the exit code is the same.
+`--server-name` is there because `$HOSTADDRESS$` is usually an IP address,
+which the certificate would have to list to pass verification; see
+[TLS](#tls).
+
+`--output json`, `yaml` and `csv` give `command` (what was sent: the command
+and its arguments joined by `!`), `result` (the status by name) and `output`
+instead; the exit code is the same.
 
 ## Options
 
@@ -48,6 +55,7 @@ and `output` instead; the exit code is the same.
 | `--no-tls`                |         | Connect in plain text                                          |
 | `-k`, `--insecure`        |         | Do not verify the server certificate                           |
 | `--ca FILE`               |         | CA certificate(s) to trust besides the system's (PEM)          |
+| `--server-name NAME`      | host    | Name the server certificate must be valid for                  |
 | `--certificate FILE`      |         | Client certificate to present (PEM)                            |
 | `--certificate-key FILE`  |         | Private key of the client certificate (PEM)                    |
 
@@ -63,6 +71,14 @@ certificate on install, so out of the box one of these is needed:
 - `--ca` pointing at a copy of the server's `certificate.pem` (or at the CA that
   issued it, if you replaced it), or
 - `--insecure`, which still encrypts but accepts any certificate.
+
+The two exclude each other: asking to trust a CA and to trust everybody is
+refused rather than resolved silently.
+
+The certificate also has to be valid for the name it is held to, which is the
+`--host` unless `--server-name` says otherwise. Use `--server-name` when you
+connect by IP address, or through a tunnel or alias, and the certificate
+carries the server's real name. That name is also what is sent as SNI.
 
 A server set up with `verify mode = peer-cert` -- what `nscp nrpe install`
 writes unless told otherwise -- only answers clients that present a certificate
@@ -93,7 +109,9 @@ arguments); its answers are not limited.
 | Output                                                    | Usual cause                                                                                    |
 | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `the server closed the connection without answering`      | This host is not in `allowed hosts`; TLS on one side only; another `payload length`             |
-| `TLS handshake ... failed: invalid peer certificate`      | The certificate is not trusted (`--ca`, `--insecure`) or does not match the host name used      |
+| `TLS handshake ... failed: invalid peer certificate`      | The certificate is not trusted (`--ca`, `--insecure`) or is for another name (`--server-name`)  |
+| `the server returned no output`                           | The check ran but printed nothing; look at the command on the server                           |
+| `the server answered in NRPE version 3`                   | The daemon replied in protocol version 3, which this client does not read                      |
 | `the server demands a client certificate`                 | `verify mode = peer-cert` on the server (`--certificate`, `--certificate-key`)                  |
 | `no answer ... within N seconds`                          | A firewall drops the packets; a slow check (`--timeout-s`); another `payload length`            |
 | `Request contained arguments (not currently allowed ...)` | `allow arguments` is off on the server                                                         |

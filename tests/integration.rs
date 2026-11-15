@@ -1752,6 +1752,50 @@ fn nrpe(target: &(String, String), global: &[&str], args: &[&str]) -> Output {
     unreachable!("the loop returns on its last attempt")
 }
 
+/// Needs no server: a command line that does not parse never gets that far.
+/// What matters is that Nagios, which runs this as a plugin, is told UNKNOWN
+/// (exit code 3, reason on stdout) rather than clap's 2, which it reads as
+/// CRITICAL.
+#[test]
+fn nrpe_usage_errors_are_unknown_not_critical() {
+    let run = |args: &[&str]| {
+        Command::new(BIN)
+            .args(args)
+            .output()
+            .expect("failed to spawn check_nsclient")
+    };
+    for (args, reason) in [
+        (
+            &["nrpe", "ping"][..],
+            "UNKNOWN: the following required arguments were not provided: --host <HOST>\n",
+        ),
+        (
+            &["--output", "json", "nrpe", "-H", "host", "--bogus", "ping"],
+            "UNKNOWN: unexpected argument '--bogus' found\n",
+        ),
+        (
+            &["nrpe", "-H", "host", "-k", "--ca", "ca.pem", "ping"],
+            "UNKNOWN: the argument '--insecure' cannot be used with '--ca <FILE>'\n",
+        ),
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(3), "{args:?}");
+        assert_eq!(stdout(&out), reason, "{args:?}");
+        // The usage is still there for whoever runs it by hand.
+        assert!(
+            stderr(&out).contains("Usage: check_nsclient nrpe"),
+            "{args:?}"
+        );
+    }
+    // Asking for help is not an error, and other commands end as before.
+    let out = run(&["nrpe", "--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(stdout(&out).contains("--server-name"), "{}", stdout(&out));
+    let out = run(&["nsclient", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(stdout(&out), "");
+}
+
 #[test]
 fn nrpe_ping_answers_over_tls() {
     let (target, _lock) = require_nrpe!();
