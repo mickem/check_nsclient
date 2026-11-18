@@ -4,6 +4,7 @@ mod auth_commands;
 pub mod client;
 mod event_commands;
 mod facts_commands;
+mod failures_commands;
 mod generic_commands;
 mod login_helper;
 mod logs_commands;
@@ -24,6 +25,7 @@ use crate::nsclient::api::{ApiClient, ApiClientApi, Auth};
 use crate::nsclient::auth_commands::route_auth_commands;
 use crate::nsclient::event_commands::route_event_commands;
 use crate::nsclient::facts_commands::route_facts_commands;
+use crate::nsclient::failures_commands::route_failures_commands;
 use crate::nsclient::generic_commands::{handle_ping_command, handle_version_command};
 use crate::nsclient::logs_commands::route_log_commands;
 use crate::nsclient::metadata_commands::route_metadata_commands;
@@ -167,6 +169,9 @@ pub async fn route_ns_client(
             route_metrics_commands(output, build_client_from_profile(args)?, command).await?
         }
         NSClientCommands::Auth { command } => route_auth_commands(output, args, command).await?,
+        NSClientCommands::Failures { command } => {
+            route_failures_commands(output, build_client_from_profile(args)?, command).await?
+        }
         NSClientCommands::Results { command } => {
             return route_results_commands(output, build_client_from_profile(args)?, command).await;
         }
