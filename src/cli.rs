@@ -131,6 +131,11 @@ pub enum NSClientCommands {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Inspect the log of failed checks, and what the host looked like when they failed
+    Failures {
+        #[command(subcommand)]
+        command: FailuresCommand,
+    },
     /// Poll the passive result cache (and feed it into Nagios)
     Results {
         #[command(subcommand)]
@@ -668,6 +673,45 @@ pub enum MetricsCommand {
     },
     /// Dump metrics in the OpenMetrics/Prometheus text exposition format
     Openmetrics {},
+}
+
+#[derive(Subcommand)]
+pub enum FailuresCommand {
+    /// List the checks that recently came back WARNING, CRITICAL or UNKNOWN (newest first)
+    List {
+        /// Comma-separated list of ok, warning, critical, unknown (or 0-3)
+        #[arg(long)]
+        status: Option<String>,
+        /// Only failures of this command or alias (case-insensitive)
+        #[arg(long)]
+        command: Option<String>,
+        /// Only failures recorded after this index (for polling)
+        #[arg(long, value_name = "INDEX")]
+        since: Option<u64>,
+        /// At most this many failures, after the other filters
+        #[arg(long)]
+        limit: Option<u64>,
+        /// Show all information (same as --output-long)
+        #[arg(short, long)]
+        long: bool,
+    },
+    /// Show how the failed-check log is configured on the agent
+    Status {},
+    /// Show the metrics and diagnostics a failed check was recorded with
+    Context {
+        /// The index of the failure (from `failures list`)
+        index: u64,
+        /// Only show this part: `metrics`, or the name of a diagnostics
+        /// section (e.g. processes.top_cpu). Text shows every part unless this
+        /// is given; csv, which can only hold one table, defaults to metrics
+        #[arg(long)]
+        section: Option<String>,
+        /// Show the labels and help text of the metrics too
+        #[arg(short, long)]
+        long: bool,
+    },
+    /// Empty the failed-check log
+    Clear {},
 }
 
 /// Server side filter for the result cache (all optional, combined with AND).

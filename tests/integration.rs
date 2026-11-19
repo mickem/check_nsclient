@@ -1697,6 +1697,91 @@ fn metrics_show() {
 }
 
 // ---------------------------------------------------------------------------
+// failures
+// ---------------------------------------------------------------------------
+
+#[test]
+fn failures_list_context_status_and_clear() {
+    let target = require_target!();
+    // `require_target!` holds the server lock, which `clear` needs: it empties
+    // a log the whole agent shares.
+    let client = shared(&target);
+
+    // The pinned agent predates the failed-check log; there the contract is
+    // that the CLI says so rather than failing on a bare 404.
+    let probe = client.ns(&["--output", "json"], &["failures", "status"]);
+    if !probe.status.success() {
+        let err = stderr(&probe);
+        assert!(
+            err.contains("this agent has no failed-check log"),
+            "unexpected error: {err}"
+        );
+        let err = assert_failure(&client.ns(&[], &["failures", "list"]), "failures list");
+        assert!(err.contains("no failed-check log"), "{err}");
+        return;
+    }
+    let status: Value = serde_json::from_str(&stdout(&probe)).expect("status json");
+    assert!(status["enabled"].is_boolean(), "{status}");
+    assert!(status.get("entries").is_none(), "{status}");
+    if status["enabled"] != true {
+        let text = client.text(&["failures", "list"]);
+        assert!(text.contains("disabled on the agent"), "{text}");
+        return;
+    }
+
+    // An unknown command is recorded too, so it makes a deterministic failure.
+    let before = status["last_index"].as_u64().unwrap_or(0);
+    let failed = client.json(&["queries", "execute", "check_nsclient_it_failure"]);
+    assert_eq!(failed["result"], 3, "{failed}");
+
+    let since = before.to_string();
+    let log = client.json(&[
+        "failures",
+        "list",
+        "--since",
+        &since,
+        "--command",
+        "check_nsclient_it_failure",
+        "--status",
+        "unknown",
+    ]);
+    let entries = log["entries"].as_array().expect("entries");
+    assert!(!entries.is_empty(), "the failure was not recorded: {log}");
+    let entry = &entries[0];
+    assert_eq!(entry["status"], 3, "{entry}");
+    assert!(
+        entry["index"].as_u64().unwrap() > before,
+        "--since was not honoured: {entry}"
+    );
+    let index = entry["index"].as_u64().unwrap().to_string();
+
+    let text = client.text(&["failures", "list", "--command", "check_nsclient_it_failure"]);
+    assert!(text.contains("check_nsclient_it_failure"), "{text}");
+    assert!(text.contains("UNKNOWN"), "{text}");
+
+    // The context exists whatever was captured; its state says what was.
+    let context = client.json(&["failures", "context", &index]);
+    assert_eq!(context["index"].as_u64().unwrap().to_string(), index);
+    assert!(context["state"].is_string(), "{context}");
+    let text = client.text(&["failures", "context", &index]);
+    assert!(
+        text.contains("Metrics at the time of the failure"),
+        "{text}"
+    );
+
+    let missing = assert_failure(
+        &client.ns(&[], &["failures", "context", "18446744073709551615"]),
+        "failures context <missing>",
+    );
+    assert!(missing.contains("not found"), "{missing}");
+
+    let cleared = client.json(&["failures", "clear"]);
+    assert!(cleared["removed"].as_u64().unwrap() >= 1, "{cleared}");
+    let after = client.json(&["failures", "list", "--since", &since]);
+    assert_eq!(after["count"], 0, "{after}");
+}
+
+// ---------------------------------------------------------------------------
 // NRPE
 // ---------------------------------------------------------------------------
 

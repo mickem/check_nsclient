@@ -4,11 +4,12 @@ use crate::nsclient::ConnectionOptions;
 use crate::nsclient::login_helper::login_and_fetch_key;
 use crate::nsclient::messages::{
     AliasResult, CachedResult, DescribedMetrics, EventRecord, ExecuteNagiosResult, ExecuteResult,
-    FactsResponse, ListModulesResult, ListQueriesResult, LogClearResult, LogRecord, LogStatus,
-    LoginResponse, MetadataChannel, MetadataResource, Metrics, ModulesResult, NewLogRecord,
-    PaginatedResponse, PingResult, QueryHelp, QueryResult, ResultFilter, ResultsRemoved,
-    ScriptRuntimes, SettingsCommandAction, SettingsCommandRequest, SettingsDeleteResult,
-    SettingsDescription, SettingsDiff, SettingsEntry, SettingsStatus, Tags,
+    FactsResponse, FailureContext, FailuresCleared, FailuresFilter, FailuresLog, ListModulesResult,
+    ListQueriesResult, LogClearResult, LogRecord, LogStatus, LoginResponse, MetadataChannel,
+    MetadataResource, Metrics, ModulesResult, NewLogRecord, PaginatedResponse, PingResult,
+    QueryHelp, QueryResult, ResultFilter, ResultsRemoved, ScriptRuntimes, SettingsCommandAction,
+    SettingsCommandRequest, SettingsDeleteResult, SettingsDescription, SettingsDiff, SettingsEntry,
+    SettingsStatus, Tags,
 };
 use async_trait::async_trait;
 #[cfg(test)]
@@ -209,7 +210,19 @@ impl ApiClient {
         &self,
         path: &str,
     ) -> anyhow::Result<Option<T>> {
-        let response = self.send_unchecked(Method::GET, path, &|b| b).await?;
+        self.get_json_optional_with_query(path, &[] as &[(String, String)])
+            .await
+    }
+
+    /// [`ApiClient::get_json_optional`] with `query` appended.
+    async fn get_json_optional_with_query<T: DeserializeOwned, Q: Serialize + ?Sized>(
+        &self,
+        path: &str,
+        query: &Q,
+    ) -> anyhow::Result<Option<T>> {
+        let response = self
+            .send_unchecked(Method::GET, path, &|b| b.query(query))
+            .await?;
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -418,6 +431,14 @@ pub trait ApiClientApi: Send + Sync {
     async fn delete_result(&self, key: &str) -> anyhow::Result<ResultsRemoved>;
     /// Empty the result cache.
     async fn clear_results(&self) -> anyhow::Result<ResultsRemoved>;
+    /// `GET /api/v2/failures`. `None` is a `404`: the agent predates the
+    /// failed-check log.
+    async fn list_failures(&self, filter: &FailuresFilter) -> anyhow::Result<Option<FailuresLog>>;
+    /// `GET /api/v2/failures/{index}/context`. `None` is a `404`: the log no
+    /// longer holds that entry (or the agent predates the log).
+    async fn get_failure_context(&self, index: u64) -> anyhow::Result<Option<FailureContext>>;
+    /// `DELETE /api/v2/failures`
+    async fn clear_failures(&self) -> anyhow::Result<FailuresCleared>;
 }
 
 #[async_trait::async_trait]
@@ -710,6 +731,25 @@ impl ApiClientApi for ApiClient {
         let response = self.send(Method::DELETE, path, |b| b).await?;
         Self::parse_json(response, path).await
     }
+
+    async fn list_failures(&self, filter: &FailuresFilter) -> anyhow::Result<Option<FailuresLog>> {
+        self.get_json_optional_with_query("api/v2/failures", &filter.to_query())
+            .await
+    }
+
+    async fn get_failure_context(&self, index: u64) -> anyhow::Result<Option<FailureContext>> {
+        // `meta` defaults to on; it is pinned so the units the table shows
+        // do not depend on that default.
+        let params = [("meta".to_string(), "1".to_string())];
+        self.get_json_optional_with_query(&format!("api/v2/failures/{index}/context"), &params)
+            .await
+    }
+
+    async fn clear_failures(&self) -> anyhow::Result<FailuresCleared> {
+        let path = "api/v2/failures";
+        let response = self.send(Method::DELETE, path, |b| b).await?;
+        Self::parse_json(response, path).await
+    }
 }
 
 #[cfg(test)]
@@ -784,6 +824,9 @@ pub mod mocks {
             async fn get_result(&self, key: &str) -> anyhow::Result<CachedResult>;
             async fn delete_result(&self, key: &str) -> anyhow::Result<ResultsRemoved>;
             async fn clear_results(&self) -> anyhow::Result<ResultsRemoved>;
+            async fn list_failures(&self, filter: &FailuresFilter) -> anyhow::Result<Option<FailuresLog>>;
+            async fn get_failure_context(&self, index: u64) -> anyhow::Result<Option<FailureContext>>;
+            async fn clear_failures(&self) -> anyhow::Result<FailuresCleared>;
         }
     }
 }
@@ -1095,6 +1138,114 @@ mod tests {
         // filters must not travel as empty parameters.
         let received = server.received_requests().await.unwrap();
         assert!(!received[0].url.query().unwrap_or("").contains("channel="));
+    }
+
+    #[tokio::test]
+    async fn list_failures_sends_only_the_set_filters() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/failures"))
+            .and(query_param("status", "critical"))
+            .and(query_param("since", "7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "enabled": true,
+                "last_index": 9,
+                "count": 1,
+                "entries": [{"index": 9, "command": "check_cpu", "status": 2, "message": "CRITICAL"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let filter = FailuresFilter {
+            status: Some("critical".into()),
+            since: Some(7),
+            ..Default::default()
+        };
+        let log = api.list_failures(&filter).await.unwrap().unwrap();
+        assert_eq!(log.last_index, 9);
+        assert_eq!(log.entries[0].command, "check_cpu");
+        let received = server.received_requests().await.unwrap();
+        let query = received[0].url.query().unwrap_or("");
+        assert!(!query.contains("limit="), "{query}");
+        assert!(!query.contains("command="), "{query}");
+    }
+
+    #[tokio::test]
+    async fn an_agent_without_the_failures_api_answers_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/failures"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let api = token_client(&server.uri(), "secret", None);
+        assert!(
+            api.list_failures(&FailuresFilter::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_context_is_fetched_with_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/failures/12/context"))
+            .and(query_param("meta", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "state": "captured",
+                "index": 12,
+                "metrics": {"workers.jobs": 214},
+                "metadata": {"workers.jobs": {"type": "counter"}},
+                "diagnostics": {"state": "disabled"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/failures/13/context"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Failed check not found: 13"))
+            .mount(&server)
+            .await;
+
+        let api = token_client(&server.uri(), "secret", None);
+        let context = api.get_failure_context(12).await.unwrap().unwrap();
+        assert_eq!(context.reference.state, "captured");
+        assert_eq!(context.metric_rows()[0].metric_type, "counter");
+        assert!(api.get_failure_context(13).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_failures_reports_the_removed_count() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/failures"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"enabled": true, "last_index": 12, "removed": 4}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = token_client(&server.uri(), "secret", None);
+        let cleared = api.clear_failures().await.unwrap();
+        assert_eq!(cleared.removed, 4);
+        assert_eq!(cleared.last_index, 12);
+    }
+
+    #[tokio::test]
+    async fn clear_failures_surfaces_a_missing_grant() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v2/failures"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("nope"))
+            .mount(&server)
+            .await;
+        let api = token_client(&server.uri(), "secret", None);
+        let err = api.clear_failures().await.unwrap_err().to_string();
+        assert!(err.contains("api/v2/failures"), "{err}");
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tabled::Tabled;
 
 #[derive(Debug, Serialize, Deserialize, Tabled)]
@@ -86,7 +86,7 @@ pub type Metrics = HashMap<String, Value>;
 /// Only `type` is always there. `help`, `unit` and `labels` appear only where
 /// the producing module declared them, so a metric published through the bare
 /// `add_metric()` shorthand carries its type and nothing it never said.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricDescription {
     /// `gauge`, `counter`, `unknown`, `info`, `summary` or `histogram`.
     #[serde(rename = "type")]
@@ -1065,6 +1065,461 @@ impl ResultsRemoved {
     pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
         let mut map = IndexMap::new();
         map.insert("removed".to_string(), self.removed.to_string());
+        map
+    }
+}
+
+/// `GET /api/v2/failures`: the agent's log of the last checks that did not
+/// come back OK, inside an envelope that says how the log is configured.
+///
+/// The envelope is what lets a caller tell "nothing has failed" from
+/// "recording is off". Every field is defaulted, and anything this client does
+/// not know about is kept in `extra`, so json/yaml echo what a newer agent
+/// sent rather than what this client happened to model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailuresLog {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub max_entries: u64,
+    #[serde(default)]
+    pub arguments_recorded: bool,
+    #[serde(default)]
+    pub arguments_mode: String,
+    #[serde(default)]
+    pub statuses: String,
+    #[serde(default)]
+    pub last_index: u64,
+    #[serde(default)]
+    pub dropped: u64,
+    #[serde(default)]
+    pub capture_metrics: bool,
+    #[serde(default)]
+    pub context_budget: u64,
+    #[serde(default)]
+    pub max_context_size: u64,
+    #[serde(default)]
+    pub context_bytes_used: u64,
+    #[serde(default)]
+    pub capture_diagnostics: bool,
+    #[serde(default)]
+    pub diagnostics_rows: u64,
+    #[serde(default)]
+    pub count: u64,
+    #[serde(default)]
+    pub entries: Vec<FailedCheck>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FailuresLog {
+    /// How the log is configured, as a key/value table (`failures status`).
+    pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
+        let mut map = IndexMap::new();
+        map.insert("enabled".to_string(), self.enabled.to_string());
+        map.insert("max entries".to_string(), self.max_entries.to_string());
+        map.insert("statuses".to_string(), self.statuses.clone());
+        map.insert("record arguments".to_string(), self.arguments_mode.clone());
+        map.insert("last index".to_string(), self.last_index.to_string());
+        map.insert("dropped".to_string(), self.dropped.to_string());
+        map.insert(
+            "capture metrics".to_string(),
+            self.capture_metrics.to_string(),
+        );
+        map.insert(
+            "capture diagnostics".to_string(),
+            self.capture_diagnostics.to_string(),
+        );
+        map.insert(
+            "diagnostics rows".to_string(),
+            self.diagnostics_rows.to_string(),
+        );
+        map.insert(
+            "context bytes used".to_string(),
+            format!("{} of {}", self.context_bytes_used, self.context_budget),
+        );
+        map.insert(
+            "max context size".to_string(),
+            self.max_context_size.to_string(),
+        );
+        map
+    }
+}
+
+/// One output line of a failed check, with its performance data.
+///
+/// `perf` is kept as the agent sent it, in order, so json/yaml echo it
+/// unchanged; the table reads it through [`PerfData`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailedCheckLine {
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub perf: IndexMap<String, Value>,
+}
+
+/// Which snapshot (metrics or diagnostics) a failed check was recorded with.
+///
+/// Only `state` is always there; the rest is present once the entry refers to
+/// a snapshot (everything but `disabled` and `none`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SnapshotRef {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_at_failure: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl SnapshotRef {
+    /// `captured (5s before)`, or just the state when there is no snapshot.
+    pub fn summary(&self) -> String {
+        let state = if self.state.is_empty() {
+            "none"
+        } else {
+            self.state.as_str()
+        };
+        match self.age_at_failure {
+            Some(age) if self.state == "captured" => format!("{state} ({age}s before)"),
+            _ => state.to_string(),
+        }
+    }
+}
+
+/// One entry of the failed-check log.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailedCheck {
+    #[serde(default)]
+    pub index: u64,
+    #[serde(default)]
+    pub timestamp: i64,
+    #[serde(default)]
+    pub date: String,
+    /// Seconds since the check failed, at the time of the request.
+    #[serde(default)]
+    pub age: i64,
+    /// Who dispatched the check (`WEBServer:admin`, `NRPEServer`, `Scheduler`).
+    #[serde(default)]
+    pub subject: String,
+    /// `0` for a check a client asked for, `1+` for one another check ran.
+    #[serde(default)]
+    pub depth: u32,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub alias: String,
+    /// Nagios status: 0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN.
+    #[serde(default = "unknown_status")]
+    pub status: i32,
+    #[serde(default)]
+    pub result: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub lines: Vec<FailedCheckLine>,
+    /// Absent when the agent does not record arguments; an empty list means
+    /// none were given (or none `record arguments = safe` keeps). The two are
+    /// kept apart on purpose, so json/yaml leave the key out rather than
+    /// sending `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<String>>,
+    #[serde(default)]
+    pub context: SnapshotRef,
+    #[serde(default)]
+    pub diagnostics: SnapshotRef,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FailedCheck {
+    /// The `alias` when set, otherwise the `command`.
+    pub fn alias_or_command(&self) -> &str {
+        if self.alias.is_empty() {
+            &self.command
+        } else {
+            &self.alias
+        }
+    }
+
+    /// The performance data of every line, `name=value` comma separated.
+    fn perf_summary(&self) -> String {
+        let mut parts = Vec::new();
+        for line in &self.lines {
+            for (name, perf) in &line.perf {
+                let rendered = serde_json::from_value::<PerfData>(perf.clone())
+                    .map(|p| perf_to_simple_string(&p))
+                    .unwrap_or_else(|_| perf.to_string());
+                parts.push(format!("{name}={rendered}"));
+            }
+        }
+        parts.join("; ")
+    }
+
+    /// The arguments as one cell; `(not recorded)` when the agent keeps none.
+    fn arguments_summary(&self) -> String {
+        match &self.arguments {
+            Some(arguments) => arguments.join(" "),
+            None => "(not recorded)".to_string(),
+        }
+    }
+
+    pub fn to_flat(&self) -> FlatFailedCheck {
+        FlatFailedCheck {
+            index: self.index,
+            date: self.date.clone(),
+            age: self.age,
+            result: result_to_string(self.status),
+            command: self.alias_or_command().to_string(),
+            message: clean_up_line(&self.message),
+            subject: self.subject.clone(),
+            depth: self.depth,
+            arguments: self.arguments_summary(),
+            perf: self.perf_summary(),
+            context: self.context.summary(),
+            diagnostics: self.diagnostics.summary(),
+        }
+    }
+}
+
+/// Table row for a failed check (see [`FailedCheck::to_flat`]).
+#[derive(Debug, Serialize, Deserialize, Tabled)]
+pub struct FlatFailedCheck {
+    #[tabled()]
+    pub index: u64,
+    #[tabled()]
+    pub date: String,
+    #[tabled()]
+    pub age: i64,
+    #[tabled()]
+    pub result: String,
+    #[tabled()]
+    pub command: String,
+    #[tabled()]
+    pub message: String,
+    #[tabled()]
+    pub subject: String,
+    #[tabled()]
+    pub depth: u32,
+    #[tabled()]
+    pub arguments: String,
+    #[tabled()]
+    pub perf: String,
+    #[tabled()]
+    pub context: String,
+    #[tabled()]
+    pub diagnostics: String,
+}
+
+/// Columns of [`FlatFailedCheck`] that are only shown with `--long`.
+pub const FAILED_CHECK_LONG_COLUMNS: &[&str] = &[
+    "age",
+    "subject",
+    "depth",
+    "arguments",
+    "perf",
+    "context",
+    "diagnostics",
+];
+
+/// Server side filter for `GET /api/v2/failures`. Unset fields match everything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FailuresFilter {
+    /// Comma separated list of `ok`, `warning`, `critical`, `unknown` (or `0`-`3`).
+    pub status: Option<String>,
+    /// Only entries whose command or alias equals this (case-insensitively).
+    pub command: Option<String>,
+    /// Only entries with an index greater than this.
+    pub since: Option<u64>,
+    /// At most this many entries, newest first, after the other filters.
+    pub limit: Option<u64>,
+}
+
+impl FailuresFilter {
+    /// The filter as query parameters, only naming the fields that are set.
+    pub fn to_query(&self) -> Vec<(String, String)> {
+        let mut query = Vec::new();
+        for (key, value) in [("status", &self.status), ("command", &self.command)] {
+            if let Some(value) = value
+                && !value.trim().is_empty()
+            {
+                query.push((key.to_string(), value.trim().to_string()));
+            }
+        }
+        if let Some(since) = self.since {
+            query.push(("since".to_string(), since.to_string()));
+        }
+        if let Some(limit) = self.limit {
+            query.push(("limit".to_string(), limit.to_string()));
+        }
+        query
+    }
+}
+
+/// A column of a diagnostics table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiagnosticsColumn {
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub column_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One diagnostics table, as `/api/v2/diagnostics/{section}` renders it: rows
+/// are objects keyed by column name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiagnosticsSection {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub captured_at: String,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub columns: Vec<DiagnosticsColumn>,
+    #[serde(default)]
+    pub rows: Vec<IndexMap<String, Value>>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl DiagnosticsSection {
+    /// Column headers, with the unit where the column declares one.
+    pub fn headers(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .map(|c| match &c.unit {
+                Some(unit) if !unit.is_empty() => format!("{} ({unit})", c.name),
+                _ => c.name.clone(),
+            })
+            .collect()
+    }
+
+    /// The rows as cells, in column order. A cell the row lacks is empty.
+    pub fn cells(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                self.columns
+                    .iter()
+                    .map(|c| row.get(&c.name).map(plain_value).unwrap_or_default())
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+/// The diagnostics a failed check was recorded with: the reference plus, when
+/// it is `captured`, every table keyed by section name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailureDiagnostics {
+    #[serde(flatten)]
+    pub reference: SnapshotRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<IndexMap<String, DiagnosticsSection>>,
+}
+
+/// `GET /api/v2/failures/{index}/context`: the metrics and diagnostics a
+/// failed check was recorded with.
+///
+/// `metrics`/`metadata` have the shape of `/api/v2/metrics?meta=1`, and are
+/// absent when the entry has no snapshot (the `state` says why).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FailureContext {
+    #[serde(default)]
+    pub index: u64,
+    #[serde(default)]
+    pub timestamp: i64,
+    #[serde(flatten)]
+    pub reference: SnapshotRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Metrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, MetricDescription>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned: Option<Value>,
+    #[serde(default)]
+    pub diagnostics: FailureDiagnostics,
+}
+
+impl FailureContext {
+    /// The header of the context: which entry, and what was captured.
+    pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
+        let mut map = IndexMap::new();
+        map.insert("index".to_string(), self.index.to_string());
+        map.insert("timestamp".to_string(), self.timestamp.to_string());
+        map.insert("metrics".to_string(), self.reference.summary());
+        if let Some(id) = self.reference.snapshot_id {
+            map.insert("metrics snapshot".to_string(), id.to_string());
+        }
+        if let Some(size) = self.reference.size {
+            map.insert("metrics size".to_string(), size.to_string());
+        }
+        map.insert(
+            "diagnostics".to_string(),
+            self.diagnostics.reference.summary(),
+        );
+        if let Some(sections) = &self.diagnostics.sections {
+            map.insert(
+                "diagnostics sections".to_string(),
+                sections.keys().cloned().collect::<Vec<_>>().join(", "),
+            );
+        }
+        map
+    }
+
+    /// The metrics as described rows (empty when nothing was captured).
+    pub fn metric_rows(&self) -> Vec<DescribedMetricRow> {
+        match &self.metrics {
+            Some(metrics) => DescribedMetrics {
+                metrics: metrics.clone(),
+                metadata: self.metadata.clone().unwrap_or_default(),
+            }
+            .to_rows(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// A JSON value as a table cell: strings unquoted, null empty.
+fn plain_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Response of `DELETE /api/v2/failures`: the envelope plus how many went.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FailuresCleared {
+    #[serde(default)]
+    pub removed: u64,
+    #[serde(default)]
+    pub last_index: u64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl FailuresCleared {
+    pub(crate) fn to_dict(&self) -> IndexMap<String, String> {
+        let mut map = IndexMap::new();
+        map.insert("removed".to_string(), self.removed.to_string());
+        map.insert("last index".to_string(), self.last_index.to_string());
         map
     }
 }

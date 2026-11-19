@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::cell::RefCell;
 #[cfg(test)]
 use std::rc::Rc;
+use tabled::builder::Builder;
 use tabled::settings::location::ByColumnName;
 use tabled::settings::{Remove, Style};
 use tabled::{Table, Tabled};
@@ -210,6 +211,42 @@ impl Rendering {
                 let mut wtr = csv::Writer::from_writer(vec![]);
                 for record in object {
                     wtr.serialize(record)?;
+                }
+                wtr.flush()?;
+                let result = String::from_utf8(wtr.into_inner()?)?;
+                self.sink.render(&result);
+            }
+        }
+        Ok(())
+    }
+
+    /// Render a table whose columns are only known at run time (text or csv).
+    ///
+    /// For data that has no fixed shape, such as a diagnostics table, which
+    /// declares its own columns.
+    pub fn render_dynamic_table(
+        &self,
+        headers: &[String],
+        rows: &[Vec<String>],
+    ) -> anyhow::Result<()> {
+        match self.output {
+            OutputFormat::Json => anyhow::bail!("Flat not supported in Json output"),
+            OutputFormat::Yaml => anyhow::bail!("Flat not supported in Yaml output"),
+            OutputFormat::Text => {
+                let mut builder = Builder::default();
+                builder.push_record(headers.iter().cloned());
+                for row in rows {
+                    builder.push_record(row.iter().cloned());
+                }
+                let mut table = builder.build();
+                self.configure_table(&mut table);
+                self.sink.render(table.to_string().as_str());
+            }
+            OutputFormat::Csv => {
+                let mut wtr = csv::Writer::from_writer(vec![]);
+                wtr.write_record(headers)?;
+                for row in rows {
+                    wtr.write_record(row)?;
                 }
                 wtr.flush()?;
                 let result = String::from_utf8(wtr.into_inner()?)?;
