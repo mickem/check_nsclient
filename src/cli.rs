@@ -483,9 +483,16 @@ pub enum FactsCommand {
     Show {
         /// Dotted fact path, for example os, os.family or storage.volumes
         path: Option<String>,
+        /// Show full values and errors instead of truncating them (same as --output-long)
+        #[arg(short, long)]
+        long: bool,
     },
     /// Ask all enabled producers to collect now and show the resulting inventory
-    Refresh {},
+    Refresh {
+        /// Show full values and errors instead of truncating them (same as --output-long)
+        #[arg(short, long)]
+        long: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1002,7 +1009,7 @@ mod tests {
             };
             assert_eq!(options.profile.as_deref(), Some("prod"));
             assert!(matches!(options.command,
-                NSClientCommands::Facts { command: FactsCommand::Show { path: parsed } }
+                NSClientCommands::Facts { command: FactsCommand::Show { path: parsed, .. } }
                     if parsed.as_deref() == path));
         }
         let cli = parse(&["nsclient", "facts", "refresh"]);
@@ -1010,7 +1017,7 @@ mod tests {
             cli.command,
             Commands::NSClient(NSClientCommandOptions {
                 command: NSClientCommands::Facts {
-                    command: FactsCommand::Refresh {}
+                    command: FactsCommand::Refresh { long: false }
                 },
                 ..
             })
