@@ -53,6 +53,11 @@ impl Rendering {
         matches!(self.output, OutputFormat::Text)
     }
 
+    /// True when full (untruncated) output was requested, by `long` or `--output-long`.
+    pub fn is_long(&self, long: &bool) -> bool {
+        self.output_long || *long
+    }
+
     pub fn is_flat(&self) -> bool {
         matches!(self.output, OutputFormat::Text | OutputFormat::Csv)
     }

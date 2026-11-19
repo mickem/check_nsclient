@@ -42,7 +42,11 @@ check_nsclient --output json nsclient -p prod facts show os.family | jq -r '.fac
 Text and CSV have `path`, `value`, `gathered`, `status` and `error` columns.
 Nested objects become dotted paths; lists stay JSON in a single value cell,
 preserving record ids and order. Text also shows the revision and last
-collection round. CSV contains only the table, suitable for piping or saving.
+collection round. To keep the text table readable, values longer than 60
+characters and errors longer than 50 are put on one line and cut off with `…`;
+pass `--long` (or the global `--output-long`) to see them in full, for example
+`facts show storage --long`. CSV contains only the table, never truncated,
+suitable for piping or saving.
 
 `gathered` is when a producer actually read the values from the host. It can
 be older than `collected`, which is when the last collection round finished.

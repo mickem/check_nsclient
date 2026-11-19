@@ -17,6 +17,28 @@ struct FactRow {
     error: String,
 }
 
+/// Widest value/error cell in the text table before it is cut (see `--long`).
+const MAX_VALUE_WIDTH: usize = 60;
+const MAX_ERROR_WIDTH: usize = 50;
+
+/// Put a cell on one line and cut it to `max` characters, ending in `…`.
+fn shorten(text: &str, max: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= max {
+        return line;
+    }
+    let mut cut: String = line.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
+}
+
+impl FactRow {
+    fn shorten(&mut self) {
+        self.value = shorten(&self.value, MAX_VALUE_WIDTH);
+        self.error = shorten(&self.error, MAX_ERROR_WIDTH);
+    }
+}
+
 impl FactsResponse {
     fn row(&self, path: &str, value: Option<&Value>) -> FactRow {
         let set = path.split('.').next().unwrap_or_default();
@@ -61,6 +83,12 @@ impl FactsResponse {
     }
 
     fn to_rows(&self) -> Vec<FactRow> {
+        let mut rows = self.all_rows();
+        rows.iter_mut().for_each(FactRow::shorten);
+        rows
+    }
+
+    fn all_rows(&self) -> Vec<FactRow> {
         let mut rows = Vec::new();
         if !self.path.is_empty() {
             if self.found {
@@ -92,20 +120,30 @@ pub async fn route_facts_commands(
     api: Box<dyn ApiClientApi>,
     command: &FactsCommand,
 ) -> anyhow::Result<()> {
-    let facts = match command {
-        FactsCommand::Show { path } => api
-            .get_facts(path.as_deref().unwrap_or_default())
-            .await
-            .context("Failed to fetch facts")?,
-        FactsCommand::Refresh {} => api
-            .refresh_facts()
-            .await
-            .context("Failed to refresh facts")?,
+    let (facts, long) = match command {
+        FactsCommand::Show { path, long } => (
+            api.get_facts(path.as_deref().unwrap_or_default())
+                .await
+                .context("Failed to fetch facts")?,
+            long,
+        ),
+        FactsCommand::Refresh { long } => (
+            api.refresh_facts()
+                .await
+                .context("Failed to refresh facts")?,
+            long,
+        ),
     };
     if !output.is_flat() {
         return output.render_nested_single(&facts);
     }
-    let rows = facts.to_rows();
+    // Truncate only the human-readable table; CSV is for machines and keeps
+    // every value whole.
+    let rows = if output.is_text() && !output.is_long(long) {
+        facts.to_rows()
+    } else {
+        facts.all_rows()
+    };
     if output.is_text() {
         output.print(&format!("Revision: {}", facts.revision));
         if !facts.collected.is_empty() {
@@ -154,6 +192,15 @@ mod tests {
     }
 
     async fn show(body: Value, format: OutputFormat, path: Option<&str>) -> String {
+        show_with(body, format, path, false).await
+    }
+
+    async fn show_with(
+        body: Value,
+        format: OutputFormat,
+        path: Option<&str>,
+        long: bool,
+    ) -> String {
         let mut api = MockApiClientApiImpl::new();
         let expected_path = path.unwrap_or_default().to_owned();
         api.expect_get_facts()
@@ -166,6 +213,7 @@ mod tests {
             Box::new(api),
             &FactsCommand::Show {
                 path: path.map(str::to_owned),
+                long,
             },
         )
         .await
@@ -320,15 +368,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn text_truncates_long_cells_unless_long_is_requested() {
+        let volumes: Vec<Value> = (0..20)
+            .map(|i| json!({"id": format!("vol{i}"), "size": i}))
+            .collect();
+        let error = format!(
+            "WMI failed:
+{}",
+            "x".repeat(200)
+        );
+        let mut body = sample();
+        body["facts"]["storage"]["volumes"] = json!(volumes);
+        body["errors"]["hardware"] = json!(error);
+
+        let rendered = show(body.clone(), OutputFormat::Text, None).await;
+        let line = |path: &str| {
+            rendered
+                .lines()
+                .find(|line| line.contains(path))
+                .unwrap()
+                .to_owned()
+        };
+        let row = line("storage.volumes");
+        assert!(
+            row.contains("[{\"id\":\"vol0\"") && row.contains('…'),
+            "{row}"
+        );
+        assert!(!row.contains("vol19"), "{row}");
+        let row = line("hardware.cpu_cores");
+        assert!(
+            row.contains("WMI failed: xxx") && row.contains('…'),
+            "{row}"
+        );
+        assert!(
+            rendered.lines().all(|l| l.chars().count() < 200),
+            "{rendered}"
+        );
+
+        let full = show_with(body.clone(), OutputFormat::Text, None, true).await;
+        assert!(full.contains("vol19") && !full.contains('…'), "{full}");
+        let csv = show(body, OutputFormat::Csv, None).await;
+        assert!(
+            csv.contains("vol19") && csv.contains(&"x".repeat(200)),
+            "{csv}"
+        );
+    }
+
+    #[test]
+    fn shorten_keeps_short_text_and_counts_characters() {
+        assert_eq!(shorten("short", 10), "short");
+        assert_eq!(
+            shorten(
+                "a
+  b", 10
+            ),
+            "a b"
+        );
+        assert_eq!(shorten("åäöåäöåäö", 5), "åäöå…");
+    }
+
+    #[tokio::test]
     async fn refresh_renders_the_returned_snapshot_without_followup_get() {
         let mut api = MockApiClientApiImpl::new();
         api.expect_refresh_facts()
             .times(1)
             .returning(|| Ok(serde_json::from_value(sample()).unwrap()));
         let (output, out) = rendering(OutputFormat::Json);
-        route_facts_commands(output, Box::new(api), &FactsCommand::Refresh {})
-            .await
-            .unwrap();
+        route_facts_commands(
+            output,
+            Box::new(api),
+            &FactsCommand::Refresh { long: false },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&out.borrow()).unwrap(),
             sample()
@@ -337,7 +449,13 @@ mod tests {
 
     #[tokio::test]
     async fn transport_errors_keep_the_operation_and_cause() {
-        for command in [FactsCommand::Show { path: None }, FactsCommand::Refresh {}] {
+        for command in [
+            FactsCommand::Show {
+                path: None,
+                long: false,
+            },
+            FactsCommand::Refresh { long: false },
+        ] {
             let mut api = MockApiClientApiImpl::new();
             let operation = match command {
                 FactsCommand::Show { .. } => {
@@ -345,7 +463,7 @@ mod tests {
                         .returning(|_| anyhow::bail!("HTTP 403"));
                     "fetch"
                 }
-                FactsCommand::Refresh {} => {
+                FactsCommand::Refresh { .. } => {
                     api.expect_refresh_facts()
                         .returning(|| anyhow::bail!("HTTP 403"));
                     "refresh"
