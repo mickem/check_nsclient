@@ -5,34 +5,34 @@ authors = ["Michael Medin <michael@medin.name>"]
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.6.1", features = ["derive", "env"] }
-reqwest = { version = "0.13.3", features = ["json", "query"] }
-tokio = { version = "1.52.3", features = ["full"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+clap = { version = "4.6.8", features = ["derive", "env"] }
+reqwest = { version = "0.13.5", features = ["json", "query"] }
+tokio = { version = "1.54.1", features = ["full"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 serde_yaml_ng = "0.10.0"
-tabled = "0.20.0"
-anyhow = "1.0.102"
+tabled = "0.22.0"
+anyhow = "1.0.104"
 csv = "1.4.0"
-indexmap = { version = "2.14.0", features = ["serde"] }
+indexmap = { version = "2.14.2", features = ["serde"] }
 keyring = {  version="3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "linux-native"] }
-async-trait = "0.1.89"
+async-trait = "0.1.92"
 crossterm = "0.29.0"
-ratatui = "0.30.0"
-tui-prompts = "0.6.3"
+ratatui = "0.30.2"
+tui-prompts = "0.6.8"
 confy = "2.0.0"
-tokio-util = "0.7.18"
-rpassword = "7.5.4"
+tokio-util = "0.7.20"
+rpassword = "7.5.5"
 # NRPE speaks TLS over a raw socket. These are the versions reqwest already
 # brings in, with the same crypto provider, so the client gains no second TLS
 # stack.
-rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 rustls-platform-verifier = "0.7.1"
 
 [dev-dependencies]
 wiremock = "0.6.5"
-mockall = "0.14"
+mockall = "0.15"
 tempfile = "3.27.0"
-serial_test = "3.4.0"
-rcgen = { version = "0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
+serial_test = "4.0.1"
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "pem"] }

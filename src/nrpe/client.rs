@@ -401,9 +401,9 @@ mod tests {
         let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         Identity {
             certificate: generated.cert.der().clone(),
-            key: PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()).into(),
+            key: PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()).into(),
             certificate_file: pem_file(&generated.cert.pem()),
-            key_file: pem_file(&generated.key_pair.serialize_pem()),
+            key_file: pem_file(&generated.signing_key.serialize_pem()),
         }
     }
 
