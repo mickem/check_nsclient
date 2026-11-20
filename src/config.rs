@@ -215,16 +215,13 @@ mod custom_mock_keyring;
 
 use crate::tokens::KeyType;
 #[cfg(test)]
-use keyring::set_default_credential_builder;
-#[cfg(test)]
 use std::env;
 #[cfg(test)]
 use tempfile::{TempDir, tempdir};
 
 #[cfg(test)]
 pub fn mock_test_config() -> TempDir {
-    set_default_credential_builder(custom_mock_keyring::default_credential_builder());
-    custom_mock_keyring::reset();
+    custom_mock_keyring::install();
     let tmp = tempdir().unwrap();
     let fake_home = tmp.path();
     unsafe {

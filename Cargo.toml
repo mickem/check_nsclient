@@ -15,7 +15,7 @@ tabled = "0.20.0"
 anyhow = "1.0.102"
 csv = "1.4.0"
 indexmap = { version = "2.14.0", features = ["serde"] }
-keyring = {  version="3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "linux-native"] }
+keyring-core = "1.0.1"
 async-trait = "0.1.89"
 crossterm = "0.29.0"
 ratatui = "0.30.0"
@@ -29,6 +29,19 @@ rpassword = "7.5.4"
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 rustls-platform-verifier = "0.7.1"
+
+# Credential stores for keyring-core, one per platform. These are the stores
+# (and the lookup attributes) keyring 3.x used with the features it was built
+# with here, so credentials saved by older builds are still found.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = { version = "1.1.0", default-features = false }
+
+# Secret Service over libdbus (needs libdbus-1-dev and pkg-config to build).
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 
 [dev-dependencies]
 wiremock = "0.6.5"

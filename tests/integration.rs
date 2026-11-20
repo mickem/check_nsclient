@@ -18,6 +18,7 @@
 //! are unique to this run; `Client::drop` logs the profile out again.
 
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -287,13 +288,45 @@ fn assert_failure(out: &Output, what: &str) -> String {
     stderr(out)
 }
 
+/// The OS credential store `check_nsclient` uses on this platform, and the entry
+/// modifiers it addresses its credentials with (see `src/tokens.rs`).
+fn os_keyring() -> (
+    std::sync::Arc<keyring_core::CredentialStore>,
+    HashMap<&'static str, &'static str>,
+) {
+    #[cfg(target_os = "macos")]
+    return (
+        apple_native_keyring_store::keychain::Store::new().expect("keychain store"),
+        HashMap::new(),
+    );
+    #[cfg(target_os = "windows")]
+    return (
+        windows_native_keyring_store::Store::new().expect("credential manager store"),
+        HashMap::new(),
+    );
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    return (
+        dbus_secret_service_keyring_store::Store::new().expect("secret service store"),
+        HashMap::from([("target", "default")]),
+    );
+}
+
 /// The API token `check_nsclient` stored for `profile` in the OS keyring.
 ///
 /// Reads the very entry the binary wrote (service `check_nsclient`, key
 /// `<profile>_token`), which is what lets the logout test prove the token is
 /// revoked server side rather than merely forgotten locally.
 fn stored_token(profile: &str) -> String {
-    keyring::Entry::new("check_nsclient", &format!("{profile}_token"))
+    let (store, modifiers) = os_keyring();
+    store
+        .build(
+            "check_nsclient",
+            &format!("{profile}_token"),
+            Some(&modifiers),
+        )
         .expect("keyring entry")
         .get_password()
         .expect("a token was stored for the profile")
